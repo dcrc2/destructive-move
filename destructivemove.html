@@ -1,0 +1,2470 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html;charset=UTF-8">
+<title>Destructive Move, via Forwarding and Destructuring operations</title>
+</head>
+
+<body>
+
+<h1 align="center">Destructive Move, via Forwarding and Destructuring operations</h1>
+
+<p align="right">David Collier (dcrc2cpp@gmail.com)</p>
+
+<h2>Contents</h2>
+<ul>
+<li><a href="#Introduction">1. Introduction</a></li>
+<li><a href="#Summary">2. Summary</a></li>
+<li><a href="#MoveableValues">3. Moveable values</a></li>
+<li><a href="#ForwardingOperator">4. The forwarding operator</a></li>
+<li><a href="#OwningReferences">5. Owning references</a></li>
+<li><a href="#DestructiveForwarding">6. Destructive forwarding</a></li>
+<li><a href="#Destructuring">7. Destructuring</a></li>
+<li><a href="#LifetimeSafety">8. Lifetime-safety</a></li>
+<li><a href="#LifetimeCast">9. Moving from non-automatic objects</a></li>
+<li><a href="#OtherIssues">10. Other issues</a></li>
+<li><a href="#References">References</a></li>
+</ul>
+
+<h2><a name="Introduction">1. Introduction</a></h2>
+
+<p>The aim of this paper is to show how &quot;destructive move&quot; could
+be added to C++ in a way which is compatible with the existing language.</p>
+
+<p>This aims to be a <em>complete</em> version of destructive move &mdash;
+that is, wherever we currently use a (non-destructive) move operation,
+if we do not actually need to reuse the moved-from object, it should be
+possible to use a destructive move instead. Indeed, merely
+being <em>possible</em> is not good enough: this version of destructive
+move aims to be <em>safe</em>, natural, and usable in day-to-day programming.
+This contrasts with with various previous proposals which allow you to move
+destructively only if you manually manage the lifetimes of the objects
+involved.</p>
+
+<h3>1.1. This is not a proposal</h3>
+
+<p>This paper is not intended to be a proposal for standardization. Rather,
+by showing what a complete proposal might look like, the hope is to provide
+better context for partial proposals such as P1144 (Object relocation in
+terms of move plus destroy). Certainly, if it was left up to the author of
+this current paper, we would have destructive move in C++. But I also
+recognize that the language changes that would be required are substantial,
+and other people have different priorities. Nevertheless I hope it may be
+useful to show exactly <em>how substantial</em> the changes would be,
+if destructive move was implemented along these lines.</p>
+
+<h2><a name="Summary">2. Summary</a></h2>
+
+<p>The approach taken by this paper would require three major additions to
+the language:</p>
+<ol>
+<li><strong>Moveable values</strong>. A moveable value is a variable whose
+declaration indicates that it can be destructively moved from.
+Formally a moveable value will be a kind of reference; but for most
+purposes it behaves more like a non-reference variable.</li>
+<li><strong>A forwarding operator,</strong> like the one proposed in P0644
+(Forward without <code>forward</code>). When applied to an lvalue reference
+or an rvalue reference, the operator is essentially just a shorthand for
+<code>std::forward</code>; but when it is applied to a moveable value,
+it performs a destructive move.</li>
+<li><strong>Destructuring operations.</strong> These might look similar to
+structured bindings, which we already have in C++. But what we want for
+destructive move is a <em>true</em> destructuring operation: this is an
+operation which ends lifetime of the complete object and provides access to
+its subobjects in the form of moveable values.</li>
+</ol>
+
+<p>This paper aims to show that these three features are a powerful
+combination. In particular, they combine to provide a way to write
+user-defined destructive move operations:</p>
+
+<pre><code>class C
+{
+    T m_t;
+    U m_u;
+    
+public:
+    C(C ~ other.*) : m_t(&gt;&gt;other.m_t), m_u(&gt;&gt;other.m_u) { }
+};</code></pre>
+
+<p>Here the constructor parameter is a moveable value;
+the declaration <code>other.*</code> indicates that
+destructuring takes place; and the initialization of members uses the
+forwarding operator <code>&gt;&gt;</code>.</p>
+
+<p>Some other minor language features will be required for completeness.
+Additionally, although not absolutely required, this approach
+works better if the order of evaluation of function arguments is defined
+as being left-to-right. The reasons for this are covered in section 7.9.</p>
+
+<h3>2.1. Goals</h3>
+
+<p>Specific things that this paper tries to achieve:</p>
+
+<ul>
+<li><em>Relocatable</em> should be a usable concept. A class can be
+Relocatable (capable of being destructively moved) without being
+Move-Constructible. A function
+which requires Move-Constructible in existing C++ should be
+easily converted to Relocatable (assuming that conservative move
+semantics are not actually desired). In particular, it should always
+be possible to deal with Relocatable objects without resorting to
+manual memory management.</li>
+<li>It should be possible to destructively move from an automatic object,
+without any danger of causing a double-destruction or non-destruction
+of the object.</li>
+<li>It should be possible to write user-defined destructive move
+operations. As a particular example, if classes <code>A</code> and
+<code>B</code> are Relocatable, then it should be possible to write
+a relocation operation for <code>std::pair&lt;A, B&gt;</code>.</li>
+</ul>
+
+<p>Also one important non-goal:</p>
+<ul>
+<li>This paper does not attempt to achieve complete
+liftetime-safety. Although the approach avoids double-destruction and
+non-destruction of automatic objects, it is still possible to cause
+undefined behaviour by creating dangling references.</li>
+</ul>
+<p>This is an attempt to do destructive move in the style of C++, not
+to try and emulate other languages.</p>
+
+<h3>2.2. Comparison with previous papers</h3>
+
+<p>One previous approach to writing user-defined destructive move
+operations is proposal P0023 (Relocator: Efficiently moving objects).
+The relocation operations end up looking fairly similar to the ones
+defined in this current paper. The difference is that P0023 aims directly
+for the user-defined relocation: the new language features are geared
+towards delivering that one operation. (The paper also has an excellent
+motivation section which I won't attempt to match here.)
+This current paper instead defines forwarding and destructuring operations
+(which add complexity but are arguably useful in their own right)
+and aims to show that user-defined relocation is a natural product of
+those operations.</p>
+
+<p>N4158 (Destructive Move) also allows user-defined relocation operations,
+but this is via a customizable library function rather than adding large
+new language features.</p>
+
+<p>The recent papers P1029 ([[move_relocates]]) and P1144 (Object relocation
+in terms of move plus destroy) are attempts to define a trait
+<code>is_trivially_relocatable</code> while keeping the changes to
+the language as minimal as possible. This seems to be a promising
+direction to take, but obviously it is not an attempt at a complete
+approach. Trivial relocation is an important
+optimization of our existing move operations, but it does not give us
+the useful new concept Relocatable.</p>
+
+<p>Sean Parent's write-up, &quot;Non Proposal for Destructive Move&quot;,
+differs from many of the others in that it suggests the possibility of
+moving destructively from automatic objects. These moves are often
+implicit (if the move is the last operation to be applied to a
+variable). In contrast, moves in this current paper are always explicit
+(they require the use of a special operator).</p>
+
+
+<h3>2.3. &quot;Destructive Move&quot; vs &quot;Relocation&quot;</h3>
+
+<p>These terms seem to be almost interchangeable. But this paper will use
+<em>relocation</em> to mean specifically constructing an object of
+some type <code>T</code> by moving from (and destroying) another object
+of type <code>T</code>. Whereas, <em>destructive move</em> describes
+what happens to the source object during a relocation. So
+&quot;destructive move&quot; is a more general feature which makes
+relocation possible, as well as allowing other things such as creating
+an object of a different type from the source.</p>
+
+
+
+
+<h2><a name="MoveableValues">3. Moveable values</a></h2>
+
+<p>If we want a <em>complete</em> implementation of destructive move, we will
+certainly want to be able to move from function arguments. For example:</p>
+
+<pre><code>std::vector&lt;T&gt; v;
+v.push_back(makeT());
+</code></pre>
+
+<p>In current C++, this calls the rvalue reference overload of
+<code>push_back</code>; the argument is then moved into the vector
+using the move constructor of <code>T</code>. We would prefer this
+to be a destructive move. How can we write a version of
+<code>push_back</code> which does this?</p>
+
+<p>The approach of this paper is to introduce a new kind of
+function parameter. This is a <em>moveable value</em>, and is
+denoted by a tilde (chosen because of the link with object
+destruction &mdash; but other syntaxes are available).</p>
+
+<pre><code>void push_back(T ~ val);</code></pre>
+
+<p>Pass-by-moveable-value is almost identical to pass-by-value; the
+key difference is whether the destruction of the function argument
+takes place <em>inside</em> the function. Consider these three
+function signatures:</p>
+
+<ul>
+<li><code>void f1(T &amp;&amp; val);</code></li>
+<li><code>void f2(T ~ val);</code></li>
+<li><code>void f3(T val);</code></li>
+</ul>
+
+<p>If function <code>f1</code> is called with a prvalue argument, then the
+temporary object that this creates is destroyed <em>by the caller</em>,
+at the end of the full expression. Whereas, if function <code>f2</code>
+is called, the <em>callee</em> has the responsibility for
+ensuring that the object is properly destroyed. The behaviour of
+<code>f3</code> depends on the implementation: for arguments passed by
+value, implementations are permitted, but not required, to make
+destruction the responsibility of the callee. If this behaviour <em>was</em>
+required, then there would be no need for &quot;moveable values&quot; at
+all: we could just use pass-by-value. But it does not seem to be possible
+to change the behaviour of pass-by-value without breaking
+backwards-compatibility. So moveable values are introduced which
+are required to be destroyed by the callee. (In these respects, moveable
+values cover similar ground to the Clang <code>[[trivial_abi]]</code>
+attribute, though moveable values are declared on an individual
+parameter, whereas <code>[[trivial_abi]]</code> is a class attribute
+and applies to all parameters of that type.)</p>
+
+<p>Local variables can also be declared as moveable values. Again, the
+main difference between a moveable value and an ordinary non-reference
+variable is that the moveable value can be destructively moved from.
+It is not possible to destructively move from variables which
+have not been declared as moveable.</p>
+
+<p>Moveable values are similar to ordinary non-reference variables
+in many respects:</p>
+<ul>
+<li>Initialization of a moveable value is similar to initialization
+of a non-reference variable (see section 3.1).</li>
+<li>Moveable values are <em>not polymorphic</em>. That is, the
+dynamic type of the object that a moveable value refers to is always
+the same as its static type.</li>
+<li>The destructor of the object referred to is normally called
+at the end of the scope of the moveable value. (Though this will be
+modified if a destructive move takes place.)</li>
+<li>No aliasing: if a moveable value or ordinary non-reference variable
+refers to some object, it is not possible to simultaneously have
+another moveable value in scope which refers to the same object,
+or to any of its subobjects.</li>
+</ul>
+
+<p>However in some ways a moveable value acts more like a
+reference:</p>
+<ul>
+<li>A moveable value may actually be <em>implemented</em> as
+a reference (see section 3.2), and this is guaranteed for any
+type which is not trivially relocatable. In particular,
+initialization of a moveable value from another moveable value
+is required to be a constant-time operation which is guaranteed
+not to throw an exception.</li>
+<li>Functions with moveable value parameters can take part in
+overloading (see section 3.3).</li>
+<li>Arrays can be passed by moveable value.</li>
+<li>It is permitted to have a moveable value whose type is an
+abstract class.</li>
+</ul>
+
+<p>In fact this paper will define a moveable value as a kind of reference
+&mdash; the implications of this are described in section 5. However the most
+important properties of moveable values do not depend on this. Especially
+for function parameters, it is probably best to think of moveable values
+as a small modification of pass-by-value.</p>
+
+
+<h3>3.1. Initialization of moveable values</h3>
+
+<p>Initialization of moveable values is almost identical to
+intialization of ordinary non-reference variables. For example:</p>
+
+<pre><code>std::vector&lt;int&gt; v1{ 1, 3, 5 };
+std::vector&lt;int&gt; ~ v2{ 1, 3, 5 };</code></pre>
+
+<p>The only observable difference here is that <code>v2</code> can be
+destructively moved from whereas <code>v1</code> cannot.</p>
+
+<p>Suppose that a moveable value is initialized from an lvalue or rvalue
+reference. Then, just as if we were initializing a non-reference variable,
+this creates a new object by calling a constructor or conversion operator:</p>
+
+<pre><code>void f(std::vector&lt;int&gt; ~ v1);
+
+void g(const std::vector&lt;int&gt; &amp; v2)
+{
+    f(v2);  // initializes the function parameter v1 with a copy of v2
+}
+</code></pre>
+
+<p>That is, we cannot directly &quot;bind&quot; a moveable value to a
+reference. In particular, calling <code>std::move</code> never results
+in a destructive move:</p>
+
+<pre><code>void f(T ~ t);
+
+void g()
+{
+    T t;
+    f(std::move(t));  // Initializes a new object by calling the usual move constructor
+}
+</code></pre>
+
+<p>To enable destructive moves we will need a stronger operation than
+<code>std::move</code>. This is provided by the forwarding operator
+which will be described in section 4.</p>
+
+<p>It is <em>not</em> in general possible to initialize a moveable value
+<code>T~</code> with an expression of some type derived from <code>T</code>.
+That is,</p>
+
+<pre><code>class T { ... };
+
+class U : public T { ... };
+
+void f(T ~ t);
+
+void g()
+{
+    f(U{});  // Not valid in general
+}
+</code></pre>
+
+<p>This would be valid if <code>T</code> has a C++11 move constructor.
+If <code>T</code> is not move-constructible, the author of
+<code>class U</code> can still arrange for <code>f(U{})</code> to be valid,
+but this would imply that the object of type <code>U</code> undergoes
+<em>destructuring</em> (see section 7).</p>
+
+
+<h3>3.2. Moveable values can be implemented either as values or
+as references</h3>
+
+<p>This paper will require a form of move-elision when forwarding a
+moveable value to a function which takes a moveable value parameter:
+that operation must not call any non-trivial constructor.
+This constrains the implementation of moveable values for types which are
+not trivially relocatable. Effectively, it means that a moveable value
+must be implemented like a reference: roughly speaking,
+as a pointer to the storage of an object.</p>
+
+<p>But for types which are trivially relocatable, it will be possible
+to implement a moveable value as a value, ie. by copying the
+representation of the object. If a type is small, a value
+implementation is likely to be be more efficient.</p>
+
+<p>The compiler can choose whether to use a value-like implementation or
+a reference-like implementation. A fuller description of the implications
+will have to wait until section 8.3: if it was done inconsistently, it
+could lead to dangling references. But the intention is that moveable values
+should be implemented as values for fundamental types and small structs.</p>
+
+<p>Giving the implementation this freedom has an important consequence:
+if a value implementation is permitted, then whenever a moveable value is
+initialized, all existing references to the source object become invalid.
+Any references to subobjects also become invalid. Use of a pre-existing
+reference would be undefined behaviour &mdash; even if the
+moveable value was actually implemented as a reference.
+Of course, in the normal case, where the moveable value was initialized
+by a temporary object, it is extremely unlikely (but not impossible) for
+there to be any other references to the object.</p>
+
+<p>The invalidation of references has a useful upside: moveable value
+parameters of trivially relocatable types can be assumed not to alias
+any other references.</p>
+
+
+
+<h3>3.3. Overloading</h3>
+
+<p>For the purposes of overload resolution, a moveable value parameter
+is treated like a reference. When an argument is a prvalue, a function
+with a moveable value parameter is preferred to one which takes a different
+kind of reference. But when the type of an argument is an lvalue or rvalue
+reference, a reference overload is preferred:</p>
+
+<pre><code>void f(const T &amp; t); // (1)
+void f(T &amp;&amp; t);      // (2)
+void f(T ~ t);       // (3)
+
+void g(const T &amp; t); // (4)
+void g(T ~ t);       // (5)
+
+void h(T &amp;&amp; t);      // (6)
+void h(T ~ t);       // (7)
+
+void test(T t)
+{
+    f(t);             // calls (1)
+    f(std::move(t));  // calls (2)
+    f(T{});           // calls (3)
+    
+    g(t);             // calls (4)
+    g(std::move(t));  // calls (4)
+    g(T{});           // calls (5)
+    
+    h(t);             // calls (7) with copy-constructed argument
+    h(std::move(t));  // calls (6)
+    h(T{});           // calls (7)
+}</code></pre>
+
+<p>In all cases, these calls would be ambiguous if the
+moveable value parameters were replaced with non-moveable
+value parameters.</p>
+
+<p>Note that in the case of <code>g(std::move(t))</code> it may
+well turn out that calling the moveable-value overload would
+have been more efficient. However, that overload will not be
+selected because it would involve an additional call to the move
+constructor. If optimal behaviour for rvalue references is
+desired then it will be necessary to add the appropriate
+overload.</p>
+
+
+
+<h3>3.4. Order of destruction of function parameters</h3>
+
+<p>As mentioned above, when a function has a moveable value
+parameter, that function is responsible for ensuring that the object
+referred to is properly destroyed. Unless a destructive move
+operation takes place, this means that the destructor of the object
+is invoked before the function returns. This takes place after the
+destruction of any local variables.</p>
+
+<p>If a function has more than one moveable value parameter, it
+is important that the associated objects are destroyed in the
+reverse order of their construction. So if function arguments
+are evaluated in left-to-right order, the moveable values
+should be destroyed in right-to-left order, and vice versa.</p>
+
+<p>C++ does not currently specify the order of evaluation of
+function arguments. However things would go more smoothly for
+destructive move if the evaluation order was specified as
+left-to-right, so that the order of destruction is right-to-left.
+This then matches the situation for classes, where subobjects
+are constructed in order of their declaration and are destroyed in
+the reverse order. Making these two situations the same will
+become important when destructuring is involved (section 7).</p>
+
+<p>What happens if a function has a mixture of moveable value
+and non-moveable value parameters? Currently implementations can
+choose to make the caller responsible for the destruction of
+parameters. We could keep this behaviour for non-moveable
+parameters, but it would mean that those parameters would be destroyed
+after all moveable value parameters, regardless of their order in
+the parameter list. It seems simpler to say that, if a function has any
+moveable value parameters, then destruction of other non-reference
+parameters becomes the responsibility of the callee as well. So:<p>
+
+<pre><code>void f(T ~ t1, T t2, T &amp;&amp; t3, T ~ t4);</code></pre>
+
+<p>Assuming that no destructive moves take place inside the function,
+then, immediately before the function returns, the destructor of
+<code>t4</code> is called, followed by the destructor of <code>t2</code>,
+followed by the destructor of <code>t1</code>. The destruction of the
+object referred to by <code>t3</code> remains the responsibility of
+the caller.</p>
+
+
+<h3>3.5. Functions which throw exceptions</h3>
+
+<p>If a function parameter is a moveable value, the lifetime of the
+argument will end inside the function even if the function exits via an
+exception.</p>
+
+<p>This behaviour is essential, otherwise the caller would not know whether
+the argument needed to be destroyed. (It might already have been moved from
+when the exception was thrown.)</p>
+
+<p>Suppose that you are in a situation which demands a very strong form of
+exception safety: you want to pass an argument to a function, and if the
+function fails then the argument must not be modified. Then a moveable
+value is not appropriate for this case. Perhaps you want an overload
+which takes an rvalue reference instead; or perhaps you need some other
+library solution (e.g. wrapping the object in a <code>std::optional</code>
+in order to keep track of whether it still exists).</p>
+
+
+<h3>3.6. The relocating constructor</h3>
+
+<p>Relocation is the fundamental destructive move operation, and
+moveable values provide a natural syntax for it:</p>
+
+<pre><code>struct S
+{
+    S(S ~ other);
+};
+</code></pre>
+
+<p>We'll call this a <em>relocating constructor</em>, because
+&quot;destructive move constructor&quot; would be a bit of a mouthful.</p>
+
+<p>Like other special constructors, this one can be implemented by the
+compiler, and the default implementation can be requested by writing
+<code>=default</code>. Roughly speaking, the default implementation is to
+destructively move each subobject. The precise mechanism for doing this
+will need to wait until section 7.</p>
+
+<p>A type may be <em>trivially relocatable</em>: this requires that the
+default relocating constructor is used and all subobjects are also
+trivially relocatable. (The C++ proposal P1144 also gives a definition
+of trivial relocatability, though its definition is very different,
+because it avoids expressing the concept in terms of a new
+constructor. Once we do have a relocating constructor, the definition
+becomes much more natural.)</p>
+
+<p>A relocating constructor is automatically declared by the
+compiler whenever a move constructor is compiler-declared.</p>
+
+<p>If you declare a move constructor but not a relocating
+constructor, then the move constructor will be chosen by overload
+resolution in situations where relocation is requested. This is
+completely safe and makes no difference to the result: either way the
+source object is destroyed. Indeed there is not necessarily any
+advantage in providing a separate relocating constructor. But there is
+a benefit if the relocating constructor can be made trivial, or
+if it is <code>noexcept</code> and the move constructor is not.</p>
+
+<p>Some destructive move proposals <em>require</em> the relocation
+operation to be <code>noexcept</code> if it exists. There is no real
+advantage to doing this here. Even if a relocating constructor is not
+declared, there is nothing to stop a user attempting to construct
+a new object with a destructive move operation: this will call the move
+constructor instead (or maybe even a copy constructor), which might
+or might not throw exceptions. So even if you never write
+a relocating constructor which throws, you might end up performing a
+throwing relocation anyway. To test whether relocating a type
+<code>T</code> might throw an exception, there would be a trait
+<code>is_nothrow_relocatable</code>.</p>
+
+
+<h3>3.7. Destructive move assignment</h3>
+
+<p>The destructive move assignment operator is the natural companion of the
+relocating constructor:</p>
+<pre><code>struct S
+{
+    S&amp; operator= (S ~ other);
+};
+</code></pre>
+
+<p>For consistency this must also be compiler-generated when appropriate.
+However it is of much lesser importance than the relocating constructor:
+it is unlikely to offer any advantage over regular move assignment.
+In particular, if a regular move-assignment operator is not
+<code>noexcept</code>, it is unlikely that a destructive move assignment
+could be made <code>noexcept</code> either. For these reasons the
+destructive move assignment operator will not need to be discussed further
+in this paper.</p>
+
+
+
+<h3>3.8. Template argument deduction</h3>
+
+<p>If a function parameter is of the form <code>T~</code> where
+<code>T</code> is a template parameter, then the type <code>T</code>
+can be deduced, and it will always be deduced to be a
+non-reference type:</p>
+
+<pre><code>template&lt;class T&gt; void f(T ~ t);
+
+std::vector&lt;int&gt; v;
+
+f(5.0);  // deduces T = double
+f(v);  // deduces T = std::vector&lt;int&gt;
+f(std::move(v));  // also deduces T = std::vector&lt;int&gt;
+</code></pre>
+
+<p>This contrasts with rvalue references: there is no special
+treatment for <code>T~</code> like there is for
+<code>T&amp;&amp;</code>.</p>
+
+
+<h3>3.9. Passing arrays by moveable value</h3>
+
+<p>An array can be passed by moveable value. The syntax is the
+same as for other kinds of references:</p>
+
+<pre><code>int f(int (~arr)[3]);
+
+void g()
+{
+    int values[] = { 1, 3, 5 };
+    f(values);  // initializes the parameter with a copy of the array
+}
+</code></pre>
+
+
+
+<h2><a name="ForwardingOperator">4. The forwarding operator</a></h2>
+
+<p>The forwarding operator is the key to being able to move from local
+variables. Its spelling, <code>&gt;&gt;</code>, is borrowed from P0644.
+But what we want here is a <em>destructive</em> forwarding operator:
+this is a more powerful operation, but at the same time,
+it comes with more restrictions on where it can be used.</p>
+
+<p>When the forwarding operator is applied to an lvalue reference
+or an rvalue reference, it acts as a more convenient spelling for
+<code>std::forward</code>: that is, <code>&gt;&gt;r</code> is
+equivalent to <code>static_cast&lt;decltype(r)&gt;</code>. This is the
+original intention of the operator that was proposed in P0644.</p>
+
+<p>However, when the forwarding operator is applied to a moveable
+value, it performs a destructive move:</p>
+
+<pre><code>void f(std::vector&lt;T&gt; ~ v)
+{
+    std::vector&lt;T&gt; v2 = &gt;&gt;v;  // destructive move from v into v2
+}
+</code></pre>
+
+<p>The essential property of a destructive move, as opposed to a C++11
+non-destructive move, is that it ends the lifetime of the source
+object. In particular, there will be no destructor call for the
+source object at the end of its original scope.</p>
+
+<p>In fact we will say that the scope of the variable itself ends
+when the forwarding operator is applied. This helps to prevent
+use-after-move mistakes such as:</p>
+
+<pre><code>void f(std::unique_ptr&lt;T&gt; p)
+{
+    std::vector&lt;std::unique_ptr&lt;T&gt;&gt; vec;
+    vec.push_back(std::move(p));
+    std::cout &lt;&lt; *p;   // oops! Dereferences a null pointer.
+}
+</code></pre>
+
+<p>With destructive move this is turned into a compile-time error:</p>
+
+<pre><code>void f(std::unique_ptr&lt;T&gt; ~ p)
+{
+    std::vector&lt;std::unique_ptr&lt;T&gt;&gt; v;
+    v.push_back(&gt;&gt;p);  // scope of p ends here
+    std::cout &lt;&lt; *p;   // ERROR: use of p outside of its scope
+}
+</code></pre>
+
+<p>P0644 gives the forwarding operator high precedence: you can forward
+a function by writing <code>&gt;&gt;f()</code>. This paper instead gives
+it the same precedence as unary <code>*</code>, which requires changing
+that to <code>(&gt;&gt;f)()</code>.
+
+
+
+<h3>4.1. Restrictions on the argument of the forwarding operator</h3>
+
+<p>The argument of the forwarding operator can <em>only</em>
+be the name of a local automatic variable or function parameter.
+That variable must be either a moveable value or a reference.
+It is not permitted to apply the forwarding operator to
+ordinary non-reference variables, or to more general expressions.
+For example:</p>
+
+<pre><code>void f(T t1)
+{
+    T t2{};
+    T&amp; t3 = t2;
+    T~ t4 = T{};
+    T~ t5 = T{};
+    
+    T t6 = &gt;&gt;t1;  // ERROR: t1 not declared as moveable
+    T t7 = &gt;&gt;t2;  // ERROR: t2 not declared as moveable
+    T&amp; t8 = &gt;&gt;t3;  // OK: can apply &gt;&gt; to a reference
+    T t9 = &gt;&gt;t4;  // OK: can apply &gt;&gt; to moveable value
+    auto x = &gt;&gt;t4.x  // ERROR: t4.x is not the name of a local reference
+    
+    T t10 = &gt;&gt;(g());  /* ERROR: cannot apply &gt;&gt; to the result of a
+                      function, even if the function returns a reference */
+}
+</code></pre>
+
+<p>In particular, this means that if you want to define a local variable
+that can be moved from, you must declare a moveable value, like
+<code>t4</code> in the example above.</p>
+
+<p>So if you see a non-reference variable, you know that the object
+will live to the end of its scope. Whereas if you see a moveable value,
+this is likely to signify that the author of the code intends to destructively
+move from the object before the normal scope of the variable ends.</p>
+
+<p>Why is it not permitted to move from non-reference local variables? We
+could choose to allow it &mdash; there is no fundamental problem with that.
+I have chosen to disallow it here: part of the reason is that
+the declaration of a moveable value then provides a useful
+visual clue that the variable might be moved from later. But also it is
+for consistency with function parameters: we cannot destructively move from
+function arguments passed by value, because the destruction of the object
+may be the responsibility of the caller, as discussed at the start of
+section 3.</p>
+
+
+<h3>4.2. Scope and lifetime</h3>
+
+<p>When the forwarding operator is applied to a moveable value,
+one of two things may happen:</p>
+
+<ul>
+<li>The result of the forwarding operator may be used to initialize
+a new moveable value. In this case, <em>ownership is transferred</em>:
+effectively, the new moveable value becomes a new name for the same
+object.</li>
+<li>Otherwise, the lifetime of the object ends at the end of the
+full expression.</li>
+</ul>
+
+<p>In either case, once the full effect of the expression has been
+evaluated, the moveable value no longer refers to a live object.</p>
+
+<p>This paper will define the above behaviour in terms of changes
+to the C++ scoping and lifetime rules:</p>
+
+<p><em>When the forwarding operator is applied, it ends both the
+lifetime and the scope of the variable that it applies to.</em></p>
+
+<p>Here the variable may be a moveable value, or it may be an lvalue
+or rvalue reference. Either way, the lifetime of the <em>reference</em>
+ends. This does not necessarily mean that the lifetime of the
+referred-to object ends: if the operand is an lvalue or rvalue reference
+then the lifetime of the object is unaffected by the lifetime of the
+reference. And even in the case of a moveable value, the lifetime of the
+object does not end immediately if ownership has been transferred.</p>
+
+<p>Of course, if a given variable never has the
+forwarding operator applied to it, then its scope and lifetime end in
+the usual place, at the end of the block or function in which it
+is declared.</p>
+
+<p>Lifetimes will be dealt with more fully in section 5 &mdash;
+the wording depends on whether we regard a moveable value as a non-reference
+type or as a kind of reference. But here we can define the
+changes to the scope of a variable:</p>
+
+<p><em>When the forwarding operator is applied to a variable, the
+scope of the variable ends at the end of the full expression.</em></p>
+
+<p>When the scope of a moveable value is exited, the destructor of the
+referred-to object will be called if and only if ownership has not been
+transferred. The rules above make this condition easy for the compiler
+to determine: the scope always ends in the same expression that the
+forwarding operator is applied, so the compiler only ever needs to
+look at the expression that has just been evaluated. This
+kind of analysis is something that the compiler already needs to do,
+in order to properly destroy temporary objects.</p>
+
+<p>Suppose that a temporary object is bound to a reference, causing the
+lifetime of the temporary object to be extended. Then later the
+forwarding operator might be applied to the reference:</p>
+
+<pre><code>const T &amp; t = makeT();
+f(&gt;&gt;t);  // ends lifetime of t</code></pre>
+
+<p>In current C++, the lifetime of the temporary object is defined to
+be the same as the lifetime of the reference. If this rule continued to
+apply, it would mean that the temporary object was destroyed when the
+forwarding operator is applied. But this is <em>not</em> what we want here.
+Applying the forwarding operator to a non-owning reference is not supposed
+to be destructive. So this rule needs some modification.</p>
+
+<p>Rather than tying the lifetime of the object to the lifetime of the
+reference, we want to say that the lifetime of the object ends as if it
+was declared at the same point as the reference. So its lifetime always
+lasts until the end of the block.</p>
+
+<p>Although the forwarding operator ends the scope of
+variables, this does not affect name-hiding.  As in existing C++,
+the <em>potential scope</em> of a local variable always extends to
+the end of the block in which it was declared. And similarly, the
+potential scope of a function parameter extends to the end of the
+function. If the forwarding operator is applied, this changes the
+end of the <em>actual</em> scope, which is what determines object
+lifetimes. However, if the potential scope of a name includes the
+declaration of a variable with a same name, then the entire
+<em>potential</em> scope of the nested variable is excluded from the
+scope of the outer name:</p>
+
+<pre><code>T x;  // (1)
+
+void f()
+{
+    U ~ x{};  // (2)
+    &gt;&gt;x;  // ends scope of the variable declared at (2)
+
+    {
+        V x;    // (3)
+        std::cout &lt;&lt; x;  // OK: refers to (3)
+    }
+    
+    std::cout &lt;&lt; x;  // ERROR: no x is in scope at this point
+    
+}  // potential scope of variable (2) ends here</code></pre>
+
+<p>In this example, on the line with the error, <code>x</code> does not
+refer to the global variable declared at (1), because we are still within
+the potential scope of variable (2). However it is not permitted to refer
+to (2) either, because the scope of that variable has been ended
+by the forwarding operator.</p>
+
+
+
+<p>The changes to the scope and lifetime rules are probably the
+single most controversial aspect of destructive move. There are other
+ways to describe the changes while keeping the same behaviour: it doesn't
+have to be phrased in terms of changes to the scoping rules. But any
+approach eventually boils down to the same problem: there must be a way to
+end the lifetime of an object before the end of the block in which it is
+declared. If this is not possible, then you cannot destructively move
+from objects with automatic storage duration.</p>
+
+
+<h3>4.3. Scope consistency</h3>
+
+<p>The scope of a variable is just a region of code: it does not depend
+on any runtime condition. But in the previous section we said that the
+forwarding operator would end the scope of the variable that it applies
+to. This means that there must be restrictions on where the forwarding
+operator can be used: it is not permitted to use the forwarding operator
+if this would lead to any ambiguities about whether a variable was
+in scope:</p>
+
+<pre><code>T ~ t = makeT();
+std::vector&lt;T&gt; v;
+if (t.good())
+{
+    v.push_back(&gt;&gt;t);  // ERROR, because ...
+}
+use(v);  // ... it would be unclear whether t was in scope at this point
+</code></pre>
+
+<p>Note that this is forbidden <em>even if <code>t</code> is never used
+again after the <code>if</code> block</em>. This may sound very restrictive,
+but it maintains the property that you always know whether a variable is
+in scope, and hence whether the destructor of an object is yet to be called.
+(We will see that there are easy ways to modify this example so that
+it does compile.)</p>
+
+<p>What if you really <em>do</em> need a variable which might or might
+not refer to a valid object? Then you would use a library class such as
+<code>std::optional</code> which explicitly keeps track of whether it
+contains an object. But it should be rare that you need to resort to
+this.</p>
+
+<p>Note that some other versions for destructive move take a different
+approach to this: these would make it legal to move from a variable
+provided that it was not used later. If the compiler is unable to
+<em>prove</em> whether a variable was live at a particular point in
+the code, it would have to insert code to keep track of this at
+runtime. But the approach of this paper is that the status of
+a variable is defined in terms of its scope, which is a purely
+compile-time property. That is,</p>
+
+<p><em>The status of a reference (whether its scope and lifetime
+have ended) depends only on where we are in the code. Restrictions
+are placed on the use of the forwarding operator to ensure that the
+status of a reference is always provably well-defined.</em></p>
+
+<p>Note that the scope of a variable may still have multiple endpoints,
+if the forwarding operator is applied in different blocks nested within
+the potential scope of the variable. But these endpoints must all be
+consistent with each other so that the scope is well-defined.</p>
+
+<p>Here are the restrictions that are imposed on where the forwarding
+operator can be used:</p>
+<ol>
+<li>The forwarding operator cannot be used inside a <code>try</code> block
+if the reference it applies to was declared outside the block.</li>
+<li>If the forwarding operator is used:
+<ul>
+<li>in an <code>if</code> or <code>else</code> block,</li>
+<li>inside a loop,</li>
+<li>in the cases of a <code>switch</code>,</li>
+<li>in a <code>catch</code> block,</li>
+</ul>
+and the reference was declared outside of that scope (or in the initializer
+of a <code>for</code> loop), then either:
+<ul>
+<li>the forwarding operator must be part of a <code>return</code> statement
+or <code>throw</code> expression; or</li>
+<li>there must be an unconditional <code>return</code>, <code>throw</code>,
+<code>break</code> or <code>continue</code> which takes place after the
+use of the forwarding operator and before the end of the block, and which
+exits the potential scope of the reference.</li>
+</ul>
+</ol>
+
+<p>Furthermore, as in existing C++, a <code>goto</code> statement cannot
+jump into the scope of a variable unless its initialization and
+destruction are trivial.</p>
+
+<p>Examples:</p>
+
+<pre><code>int f(std::vector&lt;T&gt; ~ v);
+std::vector&lt;T&gt; makeVec(int x = 0);
+
+int g1()
+{
+    auto~ v = makeVec();
+    if (check1(v))
+    {
+        return f(&gt;&gt;v);  // OK: &gt;&gt; used in return statement
+    }
+    else if (check2(v))
+    {
+        int val = f(&gt;&gt;v);  // OK: followed by unconditional return
+        if (val == 0)
+            throw std::runtime_error("Zero");
+        return val;
+    }
+    else
+    {
+        int val = f(&gt;&gt;v);  // ERROR: no unconditional return/throw
+        if (val != 0)
+            return val;
+    }
+    return -1;
+}
+
+int g2()
+{
+    auto~ v1 = makeVec();
+    try
+    {
+        return f(&gt;&gt;v1);    // ERROR: &gt;&gt; inside try block
+    }
+    catch (std::exception &amp;)
+    {
+        return f(&gt;&gt;v1);    // OK
+    }
+    
+    try
+    {
+        auto~ v2 = makeVec();
+        return f(&gt;&gt;v2);    // OK: v2 declared in same scope
+    }
+    catch (...)
+    {
+        return 0;
+    }
+}
+
+int g3()
+{
+    int result = 0;
+    auto ~ v1 = makeVec();
+    for (int x = 1; x != 100; ++x)
+    {
+        auto ~ v2 = makeVec(x);
+        if (check(v2))
+        {
+            result = f(&gt;&gt;v2); // OK: break exits scope of v2
+            break;
+        }
+        else if (check(v1))
+        {
+            result = f(&gt;&gt;v1);  // ERROR: break does not exit scope of v1
+            break;
+        }
+        
+        result += f(&gt;&gt;v1);  // ERROR: v1 declared outside of loop
+        result += f(&gt;&gt;v2);  // OK
+    }
+    return result;
+}
+
+int g4()
+{
+    int result = 0;
+    
+    auto ~ v = makeVec();
+    if (check(v))
+    {
+        goto label2;   // OK; this exits the scope of v, so the vector destructor is called
+    }
+    
+label1:
+    result += f(&gt;&gt;v);
+    
+label2:
+    if (result &lt; 10)
+    {
+        goto label1;  // ERROR: jump back into scope of v
+    }
+    return result;
+}
+</code></pre>
+
+
+
+
+<h3>4.4. Destructive moves in branches of an <code>if</code></h3>
+
+<p>It is quite common to want to destructively move from an object in
+both branches of an <code>if</code>. For example:</p>
+
+<pre><code>std::vector&lt;T&gt; good, bad;
+for (int i = 0; i != 100; ++i)
+{
+    T~ t = makeT(i);
+    std::cerr &lt;&lt; "Considering " &lt;&lt; t &lt;&lt; "\n";
+    if (t.is_good())
+    {
+        good.push_back(&gt;&gt;t);
+    }
+    else
+    {
+        bad.push_back(&gt;&gt;t);
+    }
+}
+</code></pre>
+
+<p>According to the rules of section 4.3, this is not valid. We could loosen
+the rules to make it valid &mdash; after all, regardless of which branch is
+taken, <code>t</code> will always have been moved from afterwards. This
+would be consistent with the general principle that it should be well-defined
+whether the scope of a variable has ended.</p>
+
+<p>But this paper does not suggest loosening the restrictions in this way.
+Instead, you can <em>explicitly</em> tell the compiler that both branches
+of an <code>if</code> will end the lifetime of the reference, by using an
+<code>if</code> statement with initializer (from C++17). That is, you could
+change the example to:</p>
+
+<pre><code>std::vector&lt;T&gt; good, bad;
+for (int i = 0; i != 100; ++i)
+{
+    T~ t = makeT(i);
+    std::cerr &lt;&lt; "Considering " &lt;&lt; t &lt;&lt; "\n";
+    if (T~ tmp = &gt;&gt;t; tmp.is_good())
+    {
+        good.push_back(&gt;&gt;tmp);
+    }
+    else
+    {
+        bad.push_back(&gt;&gt;tmp);
+    }
+}
+</code></pre>
+
+<p>If an <code>if</code>-with-initializer is used like this, but the
+forwarding operator is only applied in one of the branches of the
+<code>if</code>, the object will still be destroyed when the other branch
+is taken (after the code for that branch has executed).</p>
+
+<p>Using an <code>if</code>-with-initializer means that we are being very
+explicit about what happens to the object; but it is also quite verbose
+and requires creating a second name for the same moveable value. So
+perhaps it would be better to have some syntactic sugar along these
+lines:</p>
+
+<pre><code>std::vector&lt;T&gt; good, bad;
+for (int i = 0; i != 100; ++i)
+{
+    T~ t = makeT(i);
+    std::cerr &lt;&lt; "Considering " &lt;&lt; t &lt;&lt; "\n";
+    if &gt;&gt;t (t.is_good())
+    {
+        good.push_back(&gt;&gt;t);
+    }
+    else
+    {
+        bad.push_back(&gt;&gt;t);
+    }
+}
+</code></pre>
+
+<p>(This syntax could also be applied to <code>try</code> blocks.)</p>
+
+<p>But much of the time this is unnecessary anyway because we might not
+need to use the object before the <code>if</code> statement at all. For
+example we can change the original example from section 4.3 like this to
+make it compile:</p>
+
+<pre><code>std::vector&lt;T&gt; v;
+if (T~ t = makeT(); t.good())
+{
+    v.push_back(&gt;&gt;t);   // OK
+}
+use(v);
+</code></pre>
+
+
+
+<h3>4.5. Using a variable in an expression which also ends its scope</h3>
+
+<p>When the forwarding operator is applied to a variable, the scope of the variable ends at the end of the full expression. This makes it illegal to
+use the name of the variable in any way in the subsequent code. However, it
+is <em>also</em> generally illegal to use the name of an variable in the
+<em>same</em> expression that ends its scope. For example:</p>
+
+<pre><code>void f(T ~ t)
+{
+    g(t, &gt;&gt;t);  // ERROR
+}</code></pre>
+
+<p>This error is not because of the scoping rules: <code>t</code> is
+still in scope when it is used here. Instead there is a special rule
+which forbids it. (It would likely be unsafe to call <code>g</code>
+in this way, because if the first parameter of <code>g</code> is a
+reference, that reference would be invalidated if a relocation takes
+place when initializing the second parameter.)</p>
+
+<p>The use of a name in an expression which also ends its scope is
+only permitted in the following cases:</p>
+
+<ul>
+<li>In a subexpression of the form
+<code><em>a</em> OP <em>b</em></code>, where <code>OP</code> is either
+<code>&amp;&amp;</code>, <code>||</code> or the comma operator,
+if <code><em>b</em></code> involves applying the forwarding operator to
+a variable, then <code><em>a</em></code> may also use the same variable.
+However, if subsequently it is found that this leads to a call
+to an overloaded operator, the usage reverts to being
+an error.</li>
+<li>In a subexpression of the form
+<code><em>a</em> ? <em>b</em> : <em>c</em></code>,
+if <code>b</code> involves applying the forwarding operator to a variable,
+then both <code><em>a</em></code> and <code><em>c</em></code> may
+also use the same variable. Similarly if <code>c</code> involves
+applying the forwarding operator to a variable, then
+both <code><em>a</em></code> and <code><em>b</em></code> may use
+the same variable.</li>
+</ul>
+
+<p>In particular, it is possible to apply the forwarding operator
+in both branches of the ternary operator. If the forwarding operator
+is only applied in <em>one</em> branch, then the scope of the variable
+ends even if that branch was not taken. In that case, the lifetime of the
+object ends at the end of the full expression, after the destruction
+of all other temporary objects.</p>
+
+
+
+
+
+
+<h2><a name="OwningReferences">5. Owning references</a></h2>
+
+<p>Up to this point there has been an important question left
+unanswered: is <code>T~</code> a <em>type</em>, or is the tilde
+merely some kind of annotation which affects moveability without
+changing the type of the variable?
+It actually appears that this could be done either way, and the
+answer does not affect the semantics described so far in
+sections 3 and 4. Suppose we have two function declarations:</p>
+
+<pre><code>void f1(T t1);
+void f2(T ~ t2);</code></pre>
+
+<p>There seem to be three possible ways to implement destructive move
+with moveable values:</p>
+
+<ol>
+<li>The parameters <code>t1</code> and <code>t2</code> have
+different types.</li>
+<li>The parameters <code>t1</code> and <code>t2</code> have
+the same type, but the functions <code>f1</code> and
+<code>f2</code> have different types.</li>
+<li>The parameters have the same type and the functions have the
+same type.</li>
+</ol>
+
+<p>Option 3 would perhaps be the cleanest approach for new code,
+but there is a serious problem: existing implementations are permitted
+to implement pass-by-value such that the argument is destroyed by the
+caller of the function. So if we want to allow functions of type
+<code>void(T)</code> to destructively move from their argument, that
+would be a breaking change to the ABI. Unfortunately, it seems
+that this means option 3 is not viable if we want to be able to make
+existing classes relocatable.</p>
+
+<p>Options 1 and 2 both appear to be feasible. This paper chooses
+option 1: <code>T~</code> will be an actual type, distinct from
+<code>T</code>.</p>
+
+<p>In fact, <code>T~</code> will be treated as a new kind of
+reference, which this paper calls an <em>owning reference</em>.
+That is, if a variable is a moveable value, its type is an owning
+reference. However, as discussed above, an owning reference has many
+characteristics which make it more like a value: it is effectively
+part-way between a reference and a value. In particular, unlike
+other kinds of references, owning references are not polymorphic.</p>
+
+<p>A consequence of making <code>T~</code> a type is that it is
+possible to return owning references from functions, and to have
+class member variables of type <code>T~</code>. However, these
+possibilities will be rarely needed. It is possible to destructively
+move from temporary objects, so if you want to return a moveable value
+from a function, you can just return by value. (Similarly, it is rarely
+correct to return an rvalue reference in current C++.) But the
+ability to return owning references does have some uses: this paper will
+use it to simplify the specification of custom destructuring operations
+(section 7.8). These types of owning references will not be
+referred to as &quot;moveable values&quot;: a moveable value is
+either a function parameter or a local variable.</p>
+
+
+<h3>5.1. Owning references manage the lifetime of objects</h3>
+
+<p>An owning reference manages the lifetime of the object that it
+refers to. Generally, if the lifetime of the owning reference ends,
+then the lifetime of the object ends. This is what makes a
+moveable value look much like an ordinary non-reference variable:</p>
+
+<pre><code>std::vector&lt;int&gt; ~ v{ 1, 3, 5 };</code></pre>
+
+<p>Here it looks like we are initializing a named object <code>v</code>.
+If moveable values are defined to be references, what is really happening
+is that a temporary <code>vector</code> is constructed, and an owning
+reference is bound to that object (which extends the lifetime of the
+temporary). But these two things are indistinguishable.</p>
+
+<p>However the lifetime of an owning reference may also end by
+<em>transferring ownership</em> to a new owning reference, so that
+the object's lifetime becomes managed by the new owning reference.
+This is how the forwarding operator performs a destructive move:
+the result of the forwarding operator can be used to initialize
+a named owning reference, such as the moveable value parameter of
+a relocating constructor, and then the lifetime of the source object
+actually ends inside that constructor.</p>
+
+<p>(If instead we had chosen option 2 above, so that
+a the type of a moveable value was not a reference, then transfer
+of ownership would instead be described as a form of mandatory
+move-elision.)</p>
+
+<p>An owning reference manages the lifetime of an object but it does
+not manage its storage. The storage duration of an object is
+the same as in current C++:</p>
+
+<pre><code>int f(T ~ t);
+
+void g()
+{
+    int x = f(T{});  // (1)
+    T~ t = T{};      // (2)
+}</code></pre>
+
+<p>The storage for the temporary object in line (1) lasts until
+the end of the full expression. Whereas in line (2), lifetime-extension
+occurs and the storage for the temporary object must be preserved until
+the end of block. This allows ownership to be transferred to a new
+owning reference without having to relocate the object to new storage.
+(Of course, in either case the usual
+&quot;as-if&quot; rule applies, so the compiler is free to deallocate
+storage earlier if it can prove that there are no live references after a
+certain point.)</p>
+
+
+
+<h3>5.2. Lifetime of references</h3>
+
+<p>Having chosen to describe moveable values as a kind of reference,
+we can say that the argument of the forwarding operator is always
+a reference. According to section 4.2, the forwarding operator ends
+both the scope and the lifetime of the reference that it is applied
+to. The scope ends at the end of the full expression. As for the
+lifetime, we will say:</p>
+
+<p><em>The lifetime of a reference ends immediately when the
+forwarding operator is applied to it.</em></p>
+
+<p>When the operand is an owning reference, this does not immediately
+end the lifetime of the referred-to object, because ownership is
+always transferred:</p>
+<ul>
+<li>If the result of the forwarding operator initializes another
+named owning reference, then ownership is transferred to that
+new owning reference.</li>
+<li>Otherwise, ownership is transferred to the unnamed owning
+reference which is the result of the forwarding operator.
+The lifetime of this unnamed owning reference lasts until the
+end of the full expression, just as if it was a temporary object
+of a class which had a destructor. Lifetime-extension applies
+if the owning reference initializes another reference.</li>
+</ul>
+
+<p>So, in the second case, it is the end of the lifetime of the
+temporary owning reference which causes the destruction of the
+referred-to object.</p>
+
+<p>Similarly, if a function returns an owning reference, the
+same two possibilities apply: either a new owning reference
+is initialized, or the referred-to object is destroyed at the
+end of the expression which contains the function call
+(unless lifetime-extension applies).</p>
+
+<p>So unnamed owning references are destroyed as if they
+were temporary objects. Also the order of destruction is the same
+as if they were regular temporary objects. For example, suppose that
+<code>x</code> is a moveable value and <code>&gt;&gt;x</code> appears
+in a complicated expression such as</p>
+
+<pre><code>auto res = f1(f2(), &gt;&gt;x, f3()) + f4();</code></pre>
+
+<p>When does the lifetime of the object end in this example? There is
+a relatively simple way of answering this question: we can imagine
+replacing <code>&gt;&gt;x</code> with a prvalue
+expression of the same type as the object that <code>x</code> refers to.
+The lifetime of the object referred to by <code>x</code> ends at
+the same time as the hypothetical temporary object created by the equivalent
+prvalue expression.</p>
+
+<p>So, first suppose that <code>f1</code> takes non-owning reference
+parameters, and assume that no exceptions are thrown during the
+evaluation of the expression. Then the lifetime of the object ends
+at the end of the full expression, between the destruction of the
+objects returned by <code>f3</code> and <code>f2</code>.</p>
+
+<p>If instead <code>f1</code> takes owning reference parameters,
+the lifetime of the object becomes managed by the parameter,
+and will end inside the function.</p>
+
+<p>If <code>f1</code> takes its parameters by value, then everything
+depends on which constructor is called to create the value. If a relocating
+constructor is found then the object will be destroyed as part of creating
+the value; otherwise things will be like the non-owning reference case.</p>
+
+<p>What if an exception is thrown by <code>f3</code>? Then (assuming
+left-to-right evaluation) the destructor of the object <code>x</code>
+refers to will be invoked, before the destructor of the object
+returned by <code>f2</code>. Note that this happens before the
+destruction of other local variables, even if <code>x</code> was
+declared before them.</p>
+
+<p>Finally, suppose that an exception is thrown by <code>f2</code>. In
+that case, the subexpression <code>&gt;&gt;x</code> will not have been
+evaluated: the corresponding hypothetical temporary object that we are
+considering would never have been constructed. In this case, the object
+that <code>x</code> refers to is destroyed along with other local variables,
+in its usual place. (So it is destroyed after any local variables which were
+declared after it.)</p>
+
+<p>Some special cases of the above:</p>
+
+<pre><code>void f(T~ t1, T~ t2, T~ t3)
+{
+    &gt;&gt;t1;    // (1)
+    
+    T&amp;&amp; r2 = &gt;&gt;t2;  // (2)
+    const T&amp; r3 = &gt;&gt;t3;  // (3)
+}</code></pre>
+
+<p>Line (1) simply ends the lifetime of the moveable value
+<code>t1</code> by calling the destructor of the referred-to object.
+It is a way of bringing forward the destruction of that object.</p>
+
+<p>In lines (2) and (3), the initialization of a named reference
+means that lifetime-extension applies: the destruction of the object
+will happen at the end of the block.</p>
+
+
+<h3>5.3. Relocation</h3>
+
+<p>A relocation occurs when an owning reference <code>T~</code>
+initializes an object of type <code>T</code>. In principle this calls
+the relocating constructor (or a move- or copy-constructor if no
+relocating constructor is declared).</p>
+
+<p>However this relocation can be elided. The compiler should be free
+to elide the relocation whenever the storage of the source can safely
+be reused. In particular, it should normally be possible to elide relocation
+when forwarding an argument to a function which takes its parameter by
+value:</p>
+
+<pre><code>int f(T t);
+
+int g(T ~ t)
+{
+    return f(&gt;&gt;t);  // possible elision in contructing the parameter
+}
+</code></pre>
+
+<p>Note that this is not <em>mandatory</em> elision, so, as in existing
+C++, the type must be relocatable even if the compiler would be able to
+elide the relocation.</p>
+
+<p>Relocation can also occur when constructing a function return
+value:</p>
+
+<pre><code>T f()
+{
+    T ret = makeT();
+    return ret;
+}</code></pre>
+
+<p>In existing C++ this requires <code>T</code> to be move-constructible.
+If destructive move was adopted then this should be changed to require only
+relocatable. The relocation can be elided, as per the existing C++
+return value optimization.</p>
+
+<p>In fact, <code>return ret</code> should be equivalent to
+<code>return &gt;&gt;ret</code>. The forwarding operator should not
+prevent elision of the relocation.</p>
+
+
+<h3>5.4. Owning references as function arguments</h3>
+
+<p>Suppose that a function argument has type <code>T~</code>. Then for
+the purposes of template argument deduction and overload resolution,
+this behaves almost exactly like a prvalue of type <code>T</code>.</p>
+
+<p>The only difference is that if an owning reference <code>T~</code>
+initializes an object of type <code>T</code>, the type <code>T</code>
+must be relocatable as per section 5.3.</p>
+
+
+
+
+<h3>5.5. Destructive move of <code>*this</code></h3>
+
+<p>A class member function can have an owning ref-qualifier,
+in which case it is possible to move from <code>*this</code>
+by applying the forwarding operator:</p>
+
+<pre><code>struct S
+{
+    T convert_to_t() ~
+    {
+        return convert_s_to_t(&gt;&gt;*this);
+    }
+};</code></pre>
+
+<p>This is a special exception to the principle that the
+forwarding operator can only be applied to the name of a reference.</p>
+
+<p>A member function with an owning ref-qualifier cannot be virtual,
+because owning references are not polymorphic.</p>
+
+
+
+<h3>5.6. Reference collapsing</h3>
+
+<p>In existing C++, the reference collapsing rules are sometimes considered
+rather arcane, but they are important because they allow &quot;forwarding
+references&quot;. This paper will provide a different forwarding mechanism
+which does not rely on reference collapsing (see section 6), so the rules
+for owning references do not have the same importance. Still, we need to
+describe what happens: a &quot;reference to a reference&quot; will be non-owning
+except in the case of an owning reference to an owning reference. That is,</p>
+
+<ul>
+<li>If <code>X</code> is a typedef for <code>T&amp;</code> then
+<code>X~</code> is <code>T&amp;</code>.</li>
+<li>If <code>X</code> is a typedef for <code>T&amp;&amp;</code> then
+<code>X~</code> is <code>T&amp;&amp;</code>.</li>
+<li>If <code>X</code> is a typedef for <code>T~</code> then
+<code>X&amp;</code> is <code>T&amp;</code> and
+<code>X&amp;&amp;</code> is <code>T&amp;&amp;</code>. But
+<code>X~</code> is <code>T~</code>.</li>
+</ul>
+
+
+
+<h2><a name="DestructiveForwarding">6. Destructive forwarding</a></h2>
+
+<p>Whenever <code>&gt;&gt;x</code> is a valid expression,
+<code>decltype(&gt;&gt;x)</code> is the same as <code>decltype(x)</code>.
+This is what gives the operator its name: it can be used as a
+replacement for <code>std::forward</code>, as originally intended in
+this example from P0644:</p>
+
+<pre><code>template&lt;class X, class Y&gt;
+decltype(auto) foo(X &amp;&amp; x, Y &amp;&amp; y)
+{
+    return (&gt;&gt;x)(&gt;&gt;y);
+}
+</code></pre>
+
+<p>Applying the operator to an lvalue reference or rvalue reference is not
+destructive: it does not change the lifetime of the object referred
+to. So if <code>foo</code> is defined as above it will <em>only</em> do
+non-destructive forwarding. Even if we pass an owning reference expression
+such as <code>&gt;&gt;t</code> as an argument, that parameter will still
+be deduced to be a (non-owning) rvalue reference.</p>
+
+<p>But it is also possible to do <em>destructive forwarding</em>. The
+mechanism for this is similar to the existing forwarding mechanism:
+what we need is a way to deduce the type of a parameter so that it can
+be any kind of reference &mdash; an lvalue reference, rvalue reference
+or owning reference &mdash; depending on the type of the argument.</p>
+
+<p>There is no existing form of parameter declaration which can do this,
+so we need to find a new syntax. This paper suggests that when
+<code>X</code> is a template parameter,
+a function parameter of the form <code>X&amp;?</code> will
+be a <em>destructive forwarding reference</em>. The template parameter
+<code>X</code> will always be deduced to be a reference: if the
+argument is a prvalue of type <code>T</code> then <code>X</code> will
+be deduced to be <code>T~</code>. This can then be used for
+destructive forwarding:</p>
+
+<pre><code>template&lt;class X&gt;
+decltype(auto) forward_to_f(X &amp;? x)
+{
+    return f(&gt;&gt;x);
+}
+</code></pre>
+
+<p>With this definition:</p>
+<ul>
+<li>If an argument is a prvalue expression of type <code>T</code>, then the
+corresponding template parameter will be deduced as <code>T~</code>, and the
+function parameter will have type <code>T~</code>.</li>
+<li>If an argument is an owning reference <code>T~</code>, then the
+corresponding template parameter will again be deduced as <code>T~</code>, and
+the function parameter will have type <code>T~</code>.</li>
+<li>If an argument is an lvalue <code>T&amp;</code>, then the
+corresponding template parameter will be deduced as <code>T&amp;</code>,
+and the function parameter will have type <code>T&amp;</code>.</li>
+<li>If an argument is an rvalue reference <code>T&amp;&amp;</code>, then the
+corresponding template parameter will be deduced as <code>T&amp;&amp;</code>,
+and the function parameter will have type <code>T&amp;&amp;</code>.</li>
+</ul>
+
+<p>So if we pass a temporary object or owning reference as an argument,
+it will be destructively forwarded (forwarded as an owning reference).
+Whereas if we pass an lvalue or rvalue reference, it will be forwarded as-is.
+This is precisely what we would want for destructive forwarding: it allows
+<code>f</code> to destructively move from temporary objects but not
+from lvalues, just like if <code>f</code> was called directly.</p>
+
+<p>Effectively this gives us &quot;perfect forwarding&quot; of
+prvalues. The only catch is that if the target function takes its
+parameter by value, then this should be changed to a moveable value.
+If the target function cannot be changed, then forwarding of
+prvalues is not quite perfect &mdash; it requires the type to be
+relocatable &mdash; but since this relocation can be elided,
+the difference between this and true perfect forwarding will not
+normally be noticeable.</p>
+
+<p>Note that <code>X&amp;?</code> is not a type. If the template
+parameter <code>X</code> is explicitly specified, then the destructive
+forwarding reference declaration is ignored so that <code>X&amp;?</code>
+is treated the same as just <code>X</code>.
+
+<p>It is also possible to use the destructive forwarding reference
+syntax for a local variable:</p>
+
+<pre><code>auto &amp;? x = f();</code></pre>
+
+<p>Here the type of <code>x</code> will always be a reference;
+it is an owning reference if <code>f</code> returns a prvalue.</p>
+
+
+<h3>6.1. Destructive forwarding is unconditionally destructive</h3>
+
+<p>When a function uses destructive forwarding as defined above,
+if an argument is a prvalue or an owning reference then the object
+is always destroyed inside the function. This is <em>unconditional</em>
+destructive forwarding. Unconditional destructive forwarding is
+appropriate in many situations. For example, it makes sense to use
+destructive forwarding when the function stores a copy of its arguments,
+intending to forward them later: an example is the constructor of
+<code>std::thread</code>.</p>
+
+<p>But destructive forwarding is not appropriate for every forwarding
+function. For example, suppose we want to write a
+function which forwards its arguments to a second function
+<code>f</code>:</p>
+
+<pre><code>template&lt;typename ... Args&gt;
+decltype(auto) forward_to_f(Args &amp;? ...args)
+{
+    return f(&gt;&gt;args ...);
+}
+</code></pre>
+
+<p>This is potentially unsafe. Suppose that <code>f</code> returns a
+reference, or some kind of view of one of its arguments:</p>
+
+<pre><code>const char * f(const std::string & s) { return s.c_str(); }
+</code></pre>
+
+<p>Then the forwarding function doesn't work:</p>
+
+<pre><code>std::cout &lt;&lt; f("Hello");   // OK
+std::cout &lt;&lt; forward_to_f("Hello");  // UB: dangling reference!
+</code></pre>
+
+<p>In the first case, the temporary <code>string</code> lives to the end
+of the full expression, so the pointer returned from <code>f</code> is
+valid when it is used. But in the second case, <code>forward_to_f</code>
+has a moveable value parameter, so ownership of the temporary
+<code>string</code> is passed into <code>forward_to_f</code>. This means
+that the <code>string</code> is destroyed before <code>forward_to_f</code>
+returns, invalidating its return value.</p>
+
+<p>So destructive forwarding is potentially dangerous. It is not necessarily
+safe to take a function which uses the existing C++ forwarding mechanism,
+and convert it to use destructive forwarding.</p>
+
+<p>The ideal solution to this would be <em>conditional</em> destructive
+forwarding. That is, when an argument is a prvalue, we would like the
+parameter type to be deduced as <em>either</em> an owning reference
+<em>or</em> an rvalue reference depending on the corresponding
+parameter of the target function. This paper does not include a mechanism
+for conditional destructive forwarding: that would be another long paper in
+itself. This seems to be related to the more general problem of
+lifetime-extension of temporary objects created as part of an expression,
+which has not yet been solved (see papers P0066 and P0936).</p>
+
+
+
+<h2><a name="Destructuring">7. Destructuring</a></h2>
+
+<p>In order to be able to write user-defined destructive move operations,
+there must be a way to end the lifetime of an object without calling its
+destructor. This is provided by <em>destructuring</em> operations.</p>
+
+<p>A destructuring operation ends the lifetime of an object by
+&quot;splitting it&quot; into its subobjects. It does this by
+taking an owning reference to the original object and returning
+owning references to each of the subobjects.
+Because owning references are returned to each subobject, the
+destructuring operation ensures that each subobject is properly
+destroyed. But the destructor of the original object is not
+called.</p>
+
+<p>The destructuring operation for a class is normally <em>private</em>.
+Accessibility is discussed in section 7.4.</p>
+
+<p>The most natural syntax for destructuring is an extension of
+C++17 structured bindings. This is suggested in section 7.8.
+However there are some issues with this: it requires flattening
+the subobjects into a single list, which may be awkward if different
+subobjects have different accessibility, or some subobjects are generated
+from pack expansion. So while the interaction with structured bindings
+is important, the basic syntax for destructuring actually looks a
+little different.</p>
+
+
+
+<h3>7.1. Destructured moveable value declarations</h3>
+
+<p>When a moveable value is declared, its declaration
+can indicate that destructuring should happen after the moveable value is
+initialized.</p>
+
+<p>The chosen syntax is to add <code>.*</code> to the name of the
+moveable value:</p>
+
+<pre><code>struct Pair { T t; U u; };
+
+void f()
+{
+    Pair ~ p.* = Pair{ /* ... */ };
+}</code></pre>
+
+<p>When this line of code is executed, first the moveable value
+<code>p</code> is initialized from the <code>Pair</code> object as normal.
+This includes the destruction of any temporary objects as usual.
+After this, a destructuring takes place: the lifetime of the <code>Pair</code>
+ends, and owning references are created to the subobjects. These
+owning references are given the names <code>p.t</code> and
+<code>p.u</code>. (This explains the choice of syntax: <code>p.*</code>
+is suggestive of a wildcard expression.)</p>
+
+<p>Note that although <code>p.t</code> and <code>p.u</code> look like
+member accesses, in fact they are treated as <em>names</em> of
+owning references. It is not valid to refer to <code>p</code> itself,
+except as part of the names <code>p.t</code> and <code>p.u</code>.
+Since <code>p.t</code> and <code>p.u</code> are names of owning
+references, they are themselves moveable values, and the forwarding operator
+can be applied to them. (Per section 4.1, if <code>p</code> is not a
+destructured moveable value, an expression like <code>&gt;&gt;p.t</code>
+is invalid. It only becomes valid when the declaration is changed to
+<code>p.*</code>)</p>
+
+<p>We can have destructured function parameters:</p>
+
+<pre><code>void f(Pair ~ p.*)
+{
+    U~ u = &gt;&gt;p.u;
+}
+</code></pre>
+
+<p>Note that this does not affect the signature of the function.
+A function can be declared with normal moveable value
+parameters, and later defined with destructured parameters.
+The destructuring takes place at the start of execution of the function:
+if an exception is thrown while function arguments are being
+evaluated, then any moveable value parameters which have already
+been initialized are not destructured (their normal destructors will
+be called). Note that the destructuring operation itself can
+never throw an exception.</p>
+
+<p>If we do not destructively move from <code>p.t</code> or <code>p.u</code>,
+then they will be destroyed in the reverse order of their declaration
+in the class. So destructuring an object does not
+change the order of destruction of its subobjects, unless they are
+explicitly moved from.</p>
+
+<h3>7.2. Classes with reference members</h3>
+
+<p>If a class member is a reference, destructuring gives us a copy
+of the reference with the same reference type. For example:</p>
+
+<pre><code>struct S { T &amp; tref; U &amp;&amp; uref; V ~ vref; };
+
+void f(S ~ s.*)</code></pre>
+
+<p>Here in the body of <code>f</code>, <code>s.tref</code> and
+<code>s.uref</code> are non-owning references: <code>decltype(s.tref)</code>
+is <code>T&amp;</code>  and <code>decltype(s.uref)</code> is
+<code>U&amp;&amp;</code>. Similarly, <code>s.vref</code> is an
+owning reference.</p>
+
+
+<h3>7.3. Base class subobjects</h3>
+
+<p>If a class has base classes, destructuring creates owning references to the
+base class subobjects as well as the member subobjects.</p>
+
+<p>Since owning references are not polymorphic, this means that the dynamic
+type of a base class reference changes during the destructuring operation.
+Note that this mirrors what happens when the normal destructor is called:
+after the body of a destructor has executed, a kind of destructuring takes
+place.</p>
+
+<p>The syntax for destructured moveable values needs some extension
+in order to work with base classes. In current C++, the way to obtain a
+reference to a base class is to use
+<code>static_cast&lt;Base&amp;&gt;(o)</code>.
+This doesn't really work for our purposes. So another minor language feature
+is needed: a way to refer to base class subobjects which provides uniformity
+with the existing syntax for member subobjects. The suggested syntax is</p>
+
+<pre><code>o.class&lt;Base&gt;</code></pre>
+
+<p>Arguably this is a useful feature in its own right: it provides a
+simple syntax for upcasting (which is always safe), distinguishing it
+from downcasting (which may fail). But the main point is that if
+<code>o</code> is a destructured moveable value, then
+the forwarding operator can be applied as
+<code>&gt;&gt;o.class&lt;Base&gt;</code>.</p>
+
+
+<h3>7.4. Accessibility</h3>
+
+<p>A class has a <em>public</em> destructuring operation if two conditions
+hold:</p>
+
+<ol>
+<li>All of the members and bases of the class must be public.</li>
+<li>The class must not have a user-provided destructor.</li>
+</ol>
+
+<p>If a class has any private members or bases, or if it has a user-provided
+destructor, then the destructuring operation is private.</p>
+
+
+<h3>7.5. Implementation of the relocating constructor</h3>
+
+<p>This is where all of the features described so far finally
+come together. A relocating constructor can be implemented like
+this:</p>
+
+<pre><code>class C : public B
+{
+    T m_t;
+    U m_u;
+    
+public:
+    C(C~ other.*) :
+       B(&gt;&gt;other.class&lt;B&gt;),
+       m_t(&gt;&gt;other.m_t),
+       m_u(&gt;&gt;other.m_u) { }
+};</code></pre>
+
+<p>That is, the source object is destructured, then each base and member
+is destructively moved in turn. This is the default implementation: it is
+what the compiler will generate if requested by <code>=default</code>.
+Of course, if the default implementation is not suitable, it is possible
+to write the relocating constructor differently.</p>
+
+
+
+<h3>7.6. Derived-to-base conversion of owning references</h3>
+
+<p>As mentioned in section 3.1, it is not generally possible to bind an
+owning reference to an object of some derived type. But this will be
+possible if the derived type is publicly destructurable:</p>
+
+<pre><code>class T { ... };
+
+class U : public T { ... };
+
+void f(T ~ t);
+
+void g()
+{
+    f(U{});  // Valid only if the destructuring operation for U is public
+}
+</code></pre>
+
+<p>If <code>U</code> has a public destructuring operation then this code
+is valid, and an implicit destructuring takes place when the function
+argument is evaluated.</p>
+
+<p>Suppose that we change the example so that <code>T</code> is a base
+of <code>U</code> but not a direct base. Then additionally all intermediate
+base classes must be publicly destructurable.</p>
+
+<p>It is not sufficient for the destructuring operation to be
+<em>accessible</em>. If a class has a user-provided destructor then
+a derived-to-base conversion of owning references is invalid even
+when the destructuring operation is accessible. Otherwise it would be
+too easy to accidentally destructure a class which performed important
+logic in its destructor.</p>
+
+<p>However, the class author can provide an explicit conversion
+if desired:</p>
+
+<pre><code>class U : public T
+{
+public:
+    operator T~ () ~;
+};</code></pre>
+
+<p>This makes the derived-to-base conversion permitted even if the
+default destructuring operation would not be usable. And this
+explicit conversion will be used to perform the derived-to-base
+conversion whenever it is requested, even if the default destructuring
+operation would have been usable.</p>
+
+<p>As in existing C++, lifetime-extension applies when an object is bound
+to a base class reference:</p>
+
+<pre><code>T~ t = U{};</code></pre>
+
+<p>Here the storage for the object of type <code>U</code> is preserved
+until the end of the block. This applies even if a custom derived-to-base
+conversion is provided. This means that it is safe to return an owning
+reference from the custom conversion function.</p>
+
+
+
+
+<h3>7.7. Lambdas and destructuring of <code>*this</code></h3>
+
+<p>In a member function which is ref-qualified by owning reference, it is
+easy enough to destructure <code>*this</code> by writing</p>
+
+<pre><code>auto~ self.* = &gt;&gt;*this;</code></pre>
+
+<p>But for consistency with other function parameters, it would be
+preferable to have syntax to make <code>*this</code> a destructured
+function parameter as per section 7.1. This could be achieved by putting
+<code>.*</code> after the ref-qualifier. Then the subobjects can be accessed
+either by their name or by <code>this-&gt;name</code>. For example we can
+implement an explicit derived-to-base conversion like this:</p>
+
+<pre><code>class C : public B
+{
+public:
+    operator B~ () ~.*
+    {
+        return &gt;&gt;this-&gt;class&lt;B&gt;;
+    }
+};
+</code></pre>
+
+<p>It ought to be possible to create a lambda whose function call
+operator is owning-ref-qualified. These represent functions which can
+only be called once. These lambdas are <em>automatically destructured</em>
+when they are invoked &mdash; so if a lambda captures an object by copy,
+you have an moveable value for this object in the the body of
+the lambda.</p>
+
+<p>The suggested syntax for a single-use lambda is to place a tilde
+after the parameter list (if present). It is not necessary to write
+<code>.*</code> because the destructuring happens automatically:</p>
+
+<pre><code>auto~ p = std::make_unique&lt;T&gt;();
+std::thread thr([p = &gt;&gt;p]() ~ { pass_to_sink(&gt;&gt;p); });
+</code></pre>
+
+<p>These lambdas are relocatable (unless they capture a non-relocatable
+type by copy), but they are not copy-constructible or
+move-constructible. This means that their &quot;single-use&quot; nature
+is actaully enforced by the type system.</p>
+
+<p>(A further extension would be to allow lambda capture by
+owning reference.)</p>
+
+<h3>7.8. Structured bindings and custom destructuring</h3>
+
+<p>It is not absolutely necessary to have more than one syntax for
+destructuring. If you are the author of a class, destructured moveable
+values will do everything that you need. However for <em>users</em>
+of a class, other forms of destructuring would be more appropriate.</p>
+
+<p>C++ already has structured bindings, which provide
+similar-looking functionality to the destructuring operation
+that we want. We can extend that syntax to perform a
+true destructuring:</p>
+
+<pre><code>struct Pair { T t; U u; };
+
+void f(Pair ~ p)
+{
+    auto~ [t, u] = &gt;&gt;p;
+}</code></pre>
+
+<p>It's important to note that C++17 structured bindings are <em>not</em>
+destructuring operations: the original object is still there, and the
+bindings are just aliases for parts of that object.
+But when the owning reference qualifier is used as above, it becomes a true
+destructuring: the lifetime of the original object ends and new moveable
+values <code>t</code> and <code>u</code> are initialized which
+refer to the subobjects of the original <code>Pair</code>.</p>
+
+<p>The structured bindings syntax can be overloaded in this way because
+<code>auto~ [t, u]</code> would not otherwise have any useful meaning.
+It would be pointless for <code>t</code> and <code>u</code> here not
+to be moveable: if you wanted that, you could write
+<code>auto&amp;&amp; [t, u]</code>. So when the owning reference
+qualifier is used, <code>t</code> and <code>u</code> are defined to
+be moveable values (unless the corresponding class member was a
+reference) &mdash; and by definition, this means that a
+destructuring operation must take place.</p>
+
+<p>Because <code>t</code> and <code>u</code> are moveable values,
+the forwarding operator can be applied to them. So we can destructively
+move from the subobjects of our original object.</p>
+
+<p>By default, these structured bindings can only be created if the
+destructuring operation is accessible. However, for consistency with
+C++17 structured bindings, it should be possible to provide customized
+destructuring for other tuple-like types. Unfortunately the existing
+customization points for structured bindings (<code>std::get</code> etc.)
+do not work when true destructuring is involved. It is not possible to
+write a function which returns an owning reference to one subobject without
+also destroying the other subobjects. What you <em>can</em> do is provide
+a customized conversion of the entire original object to some other type
+which is publicly destructurable. This could be expressed in terms of
+operator overloading, something like:</p>
+
+<pre><code>class MyPair
+{
+    T m_t;
+    U m_u;
+    
+public:
+    std::pair&lt;T~, U~&gt; operator [.*]() ~
+    {
+        auto~ self = &gt;&gt;*this;
+        return { &gt;&gt;self.m_t, &gt;&gt;self.m_u };
+    }
+};
+
+void f()
+{
+    auto~ [t, u] = MyPair{};
+}
+</code></pre>
+
+<p>Analogously to <code>operator -&gt;</code>,
+this <code>operator [.*]</code> must either return a publicly
+destructurable type, or return another type which has an
+overoaded <code>operator [.*]</code>. Note that <code>std::tuple</code>
+itself would need to be made destructurable in this way.</p>
+
+<p>An object which is destructured using <code>operator [.*]</code> would
+have its storage duration extended to encompass that of the
+returned object.</p>
+
+
+<h3>7.9. Destructuring by unpacking</h3>
+
+<p>There is one more syntax for destructuring that may be useful, which is
+taken from proposal P0535 (Generalized unpacking and parameter pack slicing).
+This might be considered an optional extra, but it fits in nicely with
+the other operations in P0535.</p>
+
+<p>P0535 specifies that if <code>t</code> is a product type then
+<code>[:]t</code> should expand to a parameter pack equivalent to</p>
+<pre><code>get&lt;0&gt;(t), get&lt;1&gt;(t), ...</code></pre>
+
+<p>If <code>t</code> is replaced by an expression which is a prvalue or
+an owning reference, we can modify this to expand to the set of
+references returned by the destructuring operation. This allows the
+subobjects to be forwarded to another function:</p>
+
+<pre><code>struct Pair { T t; U u; };
+
+void f(T ~ t, U ~ u);
+
+void g()
+{
+    f([:]Pair{}...);
+}</code></pre>
+
+<p>Note that the exact behaviour here depends on
+the order of evaluation of function arguments.
+If function arguments are evaluated left-to-right, then they will be
+destroyed in right-to-left order, which is the same as their usual order of
+destruction when a <code>Pair</code> is destroyed. However, if function
+arguments are evaluated right-to-left, then the order of destruction will
+be changed by forwarding the subobjects. In principle, this shouldn't matter:
+if it is crucial to maintain the order of destruction of class members, then
+the class should not be publicly destructurable in the first place. But
+it would still be inconsistent with the rest of C++ if forwarding subobjects
+were to change their order of destruction. This is why destructive move
+works best if the order of evaluation of function arguments is
+defined as left-to-right.</p>
+
+<h3>7.10. Destructuring of arrays</h3>
+
+<p>Arrays can be destructured using the syntaxes of 5.7 or 5.8, e.g.</p>
+
+<pre><code>void f(T (~arr)[3])
+{
+    auto~ [t0, t1, t2] = &gt;&gt;arr;
+}</code></pre>
+
+<p>For consistency, it should also be possible to create a destructured
+moveable value, as in section 7.1:</p>
+
+<pre><code>void f(T (~arr.*)[3])
+{
+    auto~ t = &gt;&gt;T[0];
+}</code></pre>
+
+<p>In this function, <code>T[0]</code>, <code>T[1]</code> and
+<code>T[2]</code> are treated as being moveable values,
+to which the forwarding operator can be applied. As ever, the compiler
+keeps track of their scopes and lifetimes as if they were separate
+variables. But there is an important restriction that comes with this:
+the index must always be a constant expression. So it is not possible to use
+a normal <code>for</code> loop to iterate over the array. In
+practice this means that manipulation of the destructured array elements is
+likely to be via an <code>index_sequence</code>.</p>
+
+<p>For most purposes, a more convenient alternative would be to use a
+library class like the <code>owning_span</code> defined in section 7.1.</p>
+
+
+<h2><a name="LifetimeSafety">8. Lifetime-safety</a></h2>
+
+<p>As mentioned in 2.1, it is not a goal of this paper to provide complete
+lifetime-safety. As in existing C++, it is possible to create dangling
+references. But it is still important to be clear on exactly what is safe
+and what is not.</p>
+
+<h3>8.1. Dangling references</h3>
+
+<p>It is possible to obtain a non-owning reference which refers to the same
+object as a moveable value. If the forwarding operator is applied to the
+moveable value, then the non-owning reference should be assumed to be
+dangling:</p>
+
+<pre><code>void f()
+{
+    auto~ v = std::vector&lt;T&gt;{ /* ... */ };
+    auto&amp; vref = v1;
+    pass_to_sink(&gt;&gt;v);
+    use(vref); // Undefined behaviour: vref is a dangling refrence
+}</code></pre>
+
+<p>The compiler may be able to diagnose this as an error but is not required
+to do so. This is in keeping with how other dangling references are treated
+in C++.</p>
+
+<p>But this cannot be the whole story, because some classes contain
+self-references. If those self-references were invalidated when an owning
+reference was contructed, it would not be possible to implement
+destructive move operations for the class. So the actual rules are
+more subtle:</p>
+<ol>
+<li>When the lifetime of an object ends (either via a destructuring
+operation of the usual destructor), all references to that object
+become invalid.</li>
+<li>Additionally, whenever an owning reference is initialized which
+refers to a trivially relocatable object, all existing
+references to that object and its subobjects become invalid.</li>
+</ol>
+
+<p>Note that a destructuring operation creates owning references
+to all subobjects, and so point 2 applies to those subobjects
+if they are trivially relocatable. This means that, even if
+a class is not trivially relocatable, references to
+subobjects may be invalidated as soon as destructuring occurs.</p>
+
+<p>The reason for point 2 is that the compiler may implement
+an owning reference to a trivially-reclocatable type as a value.
+However, the invalidation of references occurs whether or not it
+is implemented that way.</p>
+
+<p>Clearly, applying these rules requires special knowledge of the
+class. Also if an owning reference is passed to a function, the lifetime
+of the object depends on the implementation of the function. So except
+in very special circumstances where you do control both of these things,
+the only safe approach is to assume that a reference is dangling once
+ownership has been transferred.</p>
+
+
+<h3>8.2. Owning references to deallocated storage</h3>
+
+<p>Another kind of dangling reference occurs when a live owning reference
+exists after the storage for the referred-to object has been deallocated.
+Normally scoping rules prevent this from happening, but it is possible if
+an owning reference is stored as a class member or returned from a
+function:</p>
+
+<pre><code>T~ dangerous(T~ t) { return &gt;&gt;t; }
+
+void f()
+{
+    T~ owner = dangerous(T{});  // Undefined behaviour
+}
+</code></pre>
+
+<p>Here the storage for the temporary <code>T{}</code> may be deallocated at
+the end of the full expression, so the owning reference <code>owner</code> is
+still live after the storage is deallocated. This is undefined behaviour,
+because even if the reference is never explicitly used again in the function,
+it will still be used to call the object's destructor at the end of
+its scope.</p>
+
+<p>Note that returning an owning reference from a function should be very
+rare, much like returning an rvalue reference is in current C++. The only
+common cases should be the implementation of custom destructuring operations
+(sections 5.4 and 5.7) for which there are special rules ensuring that the
+object storage duration is extended.</p>
+
+<h3>8.3. Implementation of owning references</h3>
+
+<p>The compiler can implement an owning reference <code>T~</code> as
+a value provided that <code>T</code> is trivially relocatable.</p>
+
+<p>However, the compiler must be able to prove that this is safe.
+That is, if the code is valid (no undefined behaviour
+according to the rules of 8.1 and 8.2), implementing the
+owning reference as a value must not lead to any new dangling
+references.</p>
+
+<p>This is an important example:</p>
+
+<pre><code>struct Pair { T t; U u; };
+
+T ~ destructure_to_t(Pair ~ p.*)
+{
+    return &gt;&gt;p.t;
+}
+
+void f()
+{
+    Pair ~ p1 = Pair{};
+    T ~ t = destructure_to_t(&gt;&gt;p1);
+}</code></pre>
+
+<p>This code is valid. The function <code>destructure_to_t</code> is dangerous,
+and would lead to undefined behaviour if called with a temporary argument,
+but this particular use of it is OK. The original storage for the
+<code>Pair{}</code> object is not deallocated until the end of the scope
+of <code>p1</code>, so it is valid for <code>t</code> to refer to a subobject
+in that storage, even after the original object has been destructured.</p>
+
+<p>So the implementation of owning references must not break this
+example.</p>
+
+<p>In particular, consider the <code>Pair~</code> parameter of the function
+<code>destructure_to_t</code>. If this is implemented as a reference there is
+no problem: it refers to the original storage for the <code>Pair</code>. But
+if <code>Pair~</code> is to be implemented as a value, the returned
+<code>T~</code> cannot refer to the new storage allocated for the value.
+So to make this work, returned <code>T~</code> must also be implemented as
+a value.</p>
+
+<p>More generally, it is safe to implement some owning references as values
+if two rules are followed:</p>
+
+<ul>
+<li>Whether an owning reference is implemented as a value should be a
+consistent property of the type. That is, if some owning references for
+a particular type are implemented as values, then all of them should be.</li>
+<li>If a type has owning references implemented as values then all
+of its subobject types must also have their owning references implemented
+as values.</li>
+</ul>
+
+<p>It may be possible to be slightly less restrictive, but then the compiler
+would need to be able to prove that the implementation is safe.</p>
+
+<p>There is one situation where owning references <em>must</em> be implemented
+as values: bitfields. Support for bitfields is necessary if classes which
+contain them are to be destructured. But it is not possible to have a plain
+reference to a bitfield: it must be copied. If we follow the two rules above
+then this implies that <em>all</em> owning references to integers must be
+implemented as values. Fortunately, even if we were not forced down this path,
+it would be desirable to implement <code>int~</code> as a value anyway.</p>
+
+
+<h2><a name="LifetimeCast">9. Moving from non-automatic objects</a></h2>
+
+<p>In every example up to this point, moveable values have been initialized
+either from other moveable values, or by binding to temporary objects.
+We also need to be able to create moveable values in other situations,
+e.g. from an object created by placement new.</p>
+
+<h3>9.1. Casts which change ownership</h3>
+
+<p>In order to support manual memory management, there needs to be a way to
+obtain an owning reference from a non-owning reference.</p>
+
+<p>The corresponding approach for rvalue references is to call
+<code>std::move</code>, which is implemented as
+<code>static_cast&lt;T&amp;&amp;&gt;</code>. But this paper does not suggest
+allowing <code>static_cast</code> to create an owning reference: it would
+be surprising and potentially dangerous if <code>static_cast</code> could
+do something as powerful as changing object lifetimes.
+The suggestion instead is to have a new kind of cast,
+<code>lifetime_cast</code>, which specializes in changing ownership. (This
+is analogous to the way that <code>const_cast</code> specializes in
+changing constness.)</p>
+
+<p>Because owning references are not polymorphic, the expression
+<code>lifetime_cast&lt;T~&gt;(r)</code> leads to undefined behaviour if
+<code>r</code> refers to an object whose dynamic type is not
+exactly <code>T</code>.</p>
+
+<p>To illustrate the use of <code>lifetime_cast</code> we can implement the
+function <code>uninitialized_destructive_move_n</code> from N4158, which
+relocates an array of objects from one buffer to another:</p>
+
+<pre><code>void uninitialized_destructive_move_n(T* from, size_t sz, T* to)
+{
+    for (size_t i = 0; i != sz; ++i)
+    {
+        new(to + i) T(lifetime_cast&lt;T~&gt;(*(from + i)));
+    }
+}</code></pre>
+
+<p>(This assumes that the relocation operation cannot throw: more care would
+be need to taken otherwise.)</p>
+
+<p>Note that the above code properly ends the lifetime of the source objects,
+and begins the lifetime of objects in the target buffer. There is no need for
+any magic to allow the lifetimes of objects to begin and end without
+contructor or destructor calls, which might be necessary in a partial
+destructive move proposal.</p>
+
+<p>The reverse operation, casting away ownership, is not required as often.
+But it can be used to create classes which manage the lifetime of other
+objects. For example, an <code>owning_span</code> is a class which manages
+the lifetime of a contiguous array of objects. It can be constructed from
+an owning reference to an array:</p>
+
+<pre><code>template&lt;typename T&gt; class owning_span
+{
+    T* m_data;
+    size_t m_sz;
+    
+public:
+    template&lt;size_t Size&gt; owning_span(T (~a)[Size]) :
+        m_data(lifetime_cast&lt;T(&amp;)[Size]&gt;(&gt;&gt;a)),
+        m_sz(Size) { }
+          
+    /* (Destructor and other member functions not shown) */
+};</code></pre>
+
+<p>Without the <code>lifetime_cast</code> here, the array would be destroyed
+inside the constructor. Casting away the ownership allows the class to
+manually manage ownership through the <code>m_data</code> pointer. This will
+be valid provided that the storage for the array outlives the
+<code>owning_span</code> object.</p>
+
+
+<h3>9.2. Moving objects out of containers</h3>
+
+<p>In existing C++, moving an object out of a container is a two-step process:
+first you use the element's move constructor to initialize a new object, then
+separately the moved-from object is erased from the container. This two-step
+process cannot work with destructive move: you cannot have destructed objects
+in the container, even temporarily. So the two steps need to be combined into
+a single operation.</p>
+
+<p>So in order to move objects out of containers, we would need new
+container member functions. This is a little unfortunate, because preferred
+C++ style is to keep class interfaces as minimal as possible. But one of the
+main jobs of a container is to manage the lifetime of its objects. So it
+is completely appropriate that the function which moves objects out of a
+container should be implemented by the container.</p>
+
+<p>Moving a single element out of a container is easy: the element can be
+returned by value. Indeed, the fact that <code>pop_back</code> and similar
+functions do <em>not</em> return the popped element is often considered
+a bit surprising. The existing functions probably cannot be changed, but
+there is no difficulty writing similar functions which return the
+popped element.</p>
+
+<p>Moving a range of elements out of a container is more tricky:
+they could be moved one at a time, but this might turn an <code>O(n)</code>
+operation into an <code>O(n^2)</code> operation. A more efficient approach
+is for the container to pass the removed elements to a callback, which
+allows the container to delay re-establishing its invariants until
+the entire range has been moved:</p>
+
+<pre><code>template&lt;typename Callback&gt;
+auto remove_range(const_iterator begin, const_iterator end, Callback ~ f);
+</code></pre>
+
+<p>The simple version of this would be to invoke the callback once for
+each element of the range. A more powerful approach is for the argument to
+the callback to be an input range generated by the container. This allows
+for very efficient transfer of elements, and composability with other range
+operations, but it does add complexity in the library because a new
+destructive input range type must be implemented for each container.</p>
+
+<h3>9.3. <code>std::swap</code>, <code>std::exchange</code>,
+<code>std::rotate</code> etc.</h3>
+
+<p>Ever since C++11, the default implementation of <code>std::swap</code>
+has been to use move operations. Let's try replacing those with
+destructive move operations:</p>
+
+<pre><code>void swap(T &amp; lhs, T &amp; rhs)
+{
+    T~ tmp = T(lifetime_cast&lt;T~&gt;(lhs));
+    new(&amp;lhs) T(lifetime_cast&lt;T~&gt;(rhs));
+    new(&amp;rhs) T(&gt;&gt;tmp);
+}</code></pre>
+
+<p>This might work, but something smells wrong. Destructive move is
+supposed to be <em>safe</em> &mdash; why are we suddenly having to
+resort to unsafe operations, <code>lifetime_cast</code> and placement
+<code>new</code>?</p>
+
+<p>The answer is that the unsafe look of this function is a proper
+reflection of what's actually going on. It <em>is</em> unsafe to
+implement <code>swap</code> this way, for at least three reasons:</p>
+
+<ul>
+<li>A destructive move operation might throw. If an exception was
+thrown part-way through this function, it would lead to undefined
+behaviour later when the destructor of a moved-from object is
+called.</li>
+<li><code>T</code> could be a polymorphic type, in which case it is
+not guaranteed that the dynamic type of <code>lhs</code> or
+<code>rhs</code> is the same as <code>T</code>. In that case, it
+would be undefined behaviour to use a <code>lifetime_cast</code> to
+create an owning reference to <code>T</code>.</li>
+<li>It is possible for <code>lhs</code> and <code>rhs</code> to
+alias each other. If this happens then our implementation is again
+undefined behaviour.</li>
+</ul>
+
+<p>The first two points might not apply for all types <code>T</code>,
+and we could explicitly check for aliasing to avoid the third issue.
+However, the point remains that it is not generally possible to
+implement <code>swap</code> using destructive moves.</p>
+
+<p>The proper solution to this is that <code>swap</code> should really
+be treated as a special member function. The default implementation
+of <code>swap</code> in C++11 is flawed: it should do a memberwise
+swap instead. Perhaps with reflection there will be a way to specify
+this as a library feature. Otherwise, the rule is that
+if the C++11 definition of <code>swap</code> is a bad choice for
+your type then you must implement <code>swap</code> yourself.</p>
+
+<p>So we avoid the problem with <code>swap</code> by treating it as a
+special case. But this is unsatisfactory because <code>swap</code> is
+only one example of a more general type of algorithm, where objects
+are moved from and then reconstructed later. Other examples are
+<code>std::exchange</code> and <code>std::rotate</code>. Arguably
+<code>std::exchange</code> deserves to be thought of as being as
+fundamental as <code>std::swap</code>, so we could special-case it again
+&mdash; but this can't go on for ever.</p>
+
+<p>Throughout this paper we have allowed relocation operations to throw.
+Most of the time this is fine: a moved-from object is usually
+a temporary so we don't care if it is lost. But we have now come
+to a situation where it is going to cause a problem. If relocation
+can throw then this kind of algorithm <em>cannot</em> be implemented with
+destructive move. So, assuming that we want to implement these algorithms
+in terms of destructive move where possible, we will have to fall back
+to conservative move operations if destructive move could throw.
+Of course, throwing moves are rare even in existing C++, and throwing
+destructive moves should be even rarer, but they can exist.</p>
+
+<p>Next we need to deal with the polymorphic base class issue. Calling
+<code>std::exchange</code> for a polymorphic type would be an odd thing
+to do, because it implies slicing. Similarly, an algorithm which works
+on iterators such as <code>std::rotate</code> will usually work on
+elements whose dynamic type is exactly the iterator reference type.
+But theoretically there is nothing in the function signatures to enforce this.
+So it is only possible to write these algorithms in terms of relocation
+if the type is non-polymorphic or <code>final</code>. Again we have to
+fall back to existing move operations otherwise, or alternatively specify
+that the dynamic type is a precondition of the function.</p>
+
+<p>Finally there may be aliasing issues like for <code>swap</code>. This
+is not a problem for <code>std::exchange</code> but could be an issue
+for other algorithms.</p>
+
+<p>The conclusion of all this is that it may be possible to implement
+such algorithms with destructive move, but it requires extreme care,
+and may involve a fallback to conservative move operations for some types.
+The good news is that most of the complexity would be in the library.
+Once the basic library functions are properly implemented, more complex
+algorithms can be safely built up from those.</p>
+
+
+
+
+<h2><a name="OtherIssues">10. Other issues</a></h2>
+
+<p>There are a few relatively minor issues for which discussion seems
+inappropriate given that this paper is long enough already. They may need
+some attention but do not seem to affect the main features required for
+destructive move:</p>
+<ul>
+<li>Are <code>const</code> owning references useful?</li>
+<li>Forwarding individual elements of parameter packs</li>
+<li>Destructuring of unions</li>
+<li>Destructuring and virtual inheritance</li>
+</ul>
+
+
+<h2><a name="References">References</a></h2>
+<ul>
+<li><a href="https://github.com/sean-parent/sean-parent.github.io/wiki/Non-Proposal-for-Destructive-Move">
+Sean Parent, <em>Non Proposal for Destructive Move</em></a>
+</li>
+<li><a href="https://quuxplusone.github.io/blog/2018/05/02/trivial-abi-101/">
+Arthur O'Dwyer, <em><code>[[trivial_abi]]</code> 101</em></a>
+</li>
+<li><a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n4158.pdf">
+N4158: Pablo Halpern, <em>Destructive Move</em></a>
+</li>
+<li><a href="https://wg21.link/P0023r0">
+P0023: Denis Bider, <em>Relocator: Efficiently moving objects</em></a>
+</li>
+<li><a href="https://wg21.link/P0066r0">
+P0066: David Krauss, <em>Accessors and views with lifetime extension</em></a>
+</li>
+<li><a href="https://wg21.link/P0535">
+P0535: Matthew Woehlke, <em>Generalized unpacking and parameter pack slicing</em></a>
+</li>
+<li><a href="https://wg21.link/P0644">
+P0644: Barry Revzin, <em>Forward without <code>forward</code></em></a>
+</li>
+<li><a href="https://wg21.link/P0936">
+P0936: Richard Smith &amp; Nicolai Josuttis, <em>Bind Returned/Initialized
+Objects to the Lifetime of Parameters</em></a>
+</li>
+<li><a href="https://wg21.link/P1029r0">
+P1029: Niall Douglas, <em>[[move_relocates]]</em></a>
+</li>
+<li><a href="https://wg21.link/P1144">
+P1144: Arthur O'Dwyer, <em>Object relocation in terms of move plus destroy</em></a>
+</li>
+</ul>
+
+<p></p>
+
+</body>
+</html>
