@@ -1,7 +1,8 @@
 # destructive-move
 
-The paper `destructivemove.html` is an attempt to show how
-'destructive move' could be added to C++.
+The paper `destructivemove.html`
+([view here](http://htmlpreview.github.io/?https://github.com/dcrc2cpp/destructive-move/blob/master/destructivemove.html))
+is an attempt to show how 'destructive move' could be added to C++.
 
 This paper aims to achieve full support for destructive
 move, including:
@@ -73,7 +74,8 @@ by the caller after the function returns. This is not compatible
 with allowing the function to move from its parameter.
 
 One possibility would be to specify explicitly in the function
-declaration that a different ABI should be used. Something like:
+declaration that a different calling convention should be used.
+Something like:
 
 ```cpp
 void f(T t) moveable;
