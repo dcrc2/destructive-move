@@ -1262,7 +1262,14 @@ certain point.)</p>
 
 <p>Having chosen to describe moveable values as a kind of reference,
 we can say that the argument of the forwarding operator is always
-a reference. According to section 4.2, the forwarding operator ends
+a reference, and <code>decltype(&gt;&gt;x)</code> is always the
+same as <code>decltype(x)</code>. When <code>x</code> is a moveable
+value, we will say that <code>&gt;&gt;x</code> is an xvalue expression
+whose type is an owning reference. (Similarly, a function call
+will be an xvalue expression when the function return type is an
+owning reference.)</p>
+
+<p>According to section 4.2, the forwarding operator ends
 both the scope and the lifetime of the reference that it is applied
 to. The scope ends at the end of the full expression. As for the
 lifetime, we will say:</p>
@@ -1512,22 +1519,24 @@ decltype(auto) forward_to_f(X &amp;? x)
 <li>If an argument is a prvalue expression of type <code>T</code>, then the
 corresponding template parameter will be deduced as <code>T~</code>, and the
 function parameter will have type <code>T~</code>.</li>
-<li>If an argument is an owning reference <code>T~</code>, then the
-corresponding template parameter will again be deduced as <code>T~</code>, and
-the function parameter will have type <code>T~</code>.</li>
-<li>If an argument is an lvalue <code>T&amp;</code>, then the
-corresponding template parameter will be deduced as <code>T&amp;</code>,
+<li>If an argument is an lvalue, then the corresponding template parameter
+will be deduced as an lvalue reference <code>T&amp;</code>,
 and the function parameter will have type <code>T&amp;</code>.</li>
-<li>If an argument is an rvalue reference <code>T&amp;&amp;</code>, then the
-corresponding template parameter will be deduced as <code>T&amp;&amp;</code>,
-and the function parameter will have type <code>T&amp;&amp;</code>.</li>
+<li>If an argument is an xvalue whose type is an owning reference
+<code>T~</code>, then the corresponding template parameter will again be
+deduced as <code>T~</code>, and the function parameter will have type
+<code>T~</code>.</li>
+<li>In an argument is an xvalue whose type is not an owning reference,
+then the corresponding template parameter will be deduced as an
+rvalue reference <code>T&amp;&amp;</code>, and the function parameter
+will have type <code>T&amp;&amp;</code>.</li>
 </ul>
 
 <p>So if we pass a temporary object or owning reference as an argument,
 it will be destructively forwarded (forwarded as an owning reference).
-Whereas if we pass an lvalue or rvalue reference, it will be forwarded as-is.
-This is precisely what we would want for destructive forwarding: it allows
-<code>f</code> to destructively move from temporary objects but not
+Whereas if we pass an lvalue or an rvalue reference, it will be forwarded
+as-is. This is precisely what we would want for destructive forwarding:
+it allows <code>f</code> to destructively move from temporary objects but not
 from lvalues, just like if <code>f</code> was called directly.</p>
 
 <p>Effectively this gives us &quot;perfect forwarding&quot; of
