@@ -2336,7 +2336,47 @@ be valid provided that the storage for the array outlives the
 <code>owning_span</code> object.</p>
 
 
-<h3>9.2. Moving objects out of containers</h3>
+<h3>9.2. Implementation of <code>std::optional</code></h3>
+
+<p><code>lifetime_cast</code> can be used to implement the relocating
+constructor of a class such as <code>optional&lt;T&gt;</code>. A basic
+implementation might look like this:</p>
+
+<pre><code>template&lt;typename T&gt; class optional
+{    
+public:
+    optional(optional ~ other.*) : m_engaged(other.m_engaged) {
+        if (m_engaged) {
+            new (m_storage.addr()) T(
+                    lifetime_cast&lt;T~&gt;(*other.m_storage.addr()));
+        }
+    }
+    
+    /* (other member functions omitted) */
+    
+private:
+    optional_storage&lt;T&gt; m_storage;
+    bool m_engaged;
+};</code></pre>
+
+<p>Here <code>optional_storage</code> is a class which provides storage
+with the correct size and alignment to store an object of type <code>T</code>.
+This could for example be implemented in terms of
+<code>std::aligned_storage</code>; however if <code>T</code> is not trivially
+relocatable then <code>optional_storage&lt;T&gt;</code> must also not be
+trivially relocatable, otherwise when the source <code>optional</code> object
+is destructured its storage could be relocated, which would invalidate
+the <code>T</code> object contained within it.</p>
+
+<p>This basic implementation is appropriate for types which are
+not trivially relocatable. But if <code>T</code> is trivially relocatable
+we would like to ensure that <code>optional&lt;T&gt;</code> is also trivially
+relocatable. There is no way to write a single relocating constructor which
+covers both possibilities: instead some other technique would be needed to
+make the constructor conditionally trivial (which is already done for other
+special member functions of <code>std::optional</code>).</p>
+
+<h3>9.3. Moving objects out of containers</h3>
 
 <p>In existing C++, moving an object out of a container is a two-step process:
 first you use the element's move constructor to initialize a new object, then
@@ -2388,7 +2428,7 @@ only once, so single-use functions should be supported.</p>
 
 
 
-<h3>9.3. <code>std::swap</code>, <code>std::exchange</code>,
+<h3>9.4. <code>std::swap</code>, <code>std::exchange</code>,
 <code>std::rotate</code> etc.</h3>
 
 <p>Ever since C++11, the default implementation of <code>std::swap</code>
