@@ -1182,19 +1182,24 @@ of all other temporary objects.</p>
 
 <h2><a name="OwningReferences">5. Owning references</a></h2>
 
-<p>Up to this point there has been an important question left
-unanswered: is <code>T~</code> a <em>type</em>, or is the tilde
-merely some kind of annotation which affects moveability without
-changing the type of the variable?
-It actually appears that this could be done either way, and the
-answer does not affect the semantics described so far in
-sections 3 and 4. Suppose we have two function declarations:</p>
+<p>In this paper a moveable value is formally a kind of reference.
+The type <code>T~</code> will be called an <em>owning reference</em>.
+That is, if a variable is a moveable value, its type is an owning
+reference.</p>
+
+<p>This is actually not the only possible way to implement moveable
+values: an alternative is that in a declaration of the form
+<code>T ~ t</code>, the type of <code>t</code> is simply
+<code>T</code>, and the tilde is merely a kind of annotation
+which declares that <code>t</code> can be moved from. This
+does not affect the semantics described so far in sections
+3 and 4. Suppose we have two function declarations:</p>
 
 <pre><code>void f1(T t1);
 void f2(T ~ t2);</code></pre>
 
-<p>There seem to be three possible ways to implement destructive move
-with moveable values:</p>
+<p>There seem to be three possible ways to implement
+destructive move with moveable values:</p>
 
 <ol>
 <li>The parameters <code>t1</code> and <code>t2</code> have
@@ -1207,25 +1212,21 @@ same type.</li>
 </ol>
 
 <p>Option 3 would perhaps be the cleanest approach for new code,
-but there is a serious problem: existing implementations are permitted
-to implement pass-by-value such that the argument is destroyed by the
-caller of the function. So if we want to allow functions of type
-<code>void(T)</code> to destructively move from their argument, that
-would be a breaking change to the ABI. Unfortunately, it seems
-that this means option 3 is not viable if we want to be able to make
-existing classes relocatable.</p>
+but this runs into the problem that was discussed in section 3.1:
+existing implementations are permitted to implement pass-by-value such
+that the argument is destroyed by the caller of the function. So if we
+want to allow functions of type <code>void(T)</code> to destructively
+move from their argument, that would be a breaking change to the ABI.
+Unfortunately, it seems that this means option 3 is not viable if we
+want to be able to make existing classes relocatable.</p>
 
 <p>Options 1 and 2 both appear to be feasible. This paper chooses
 option 1: <code>T~</code> will be an actual type, distinct from
-<code>T</code>.</p>
-
-<p>In fact, <code>T~</code> will be treated as a new kind of
-reference, which this paper calls an <em>owning reference</em>.
-That is, if a variable is a moveable value, its type is an owning
-reference. However, as discussed above, an owning reference has many
-characteristics which make it more like a value: it is effectively
-part-way between a reference and a value. In particular, unlike
-other kinds of references, owning references are not polymorphic.</p>
+<code>T</code>. This is an owning reference; however, as discussed in
+section 3, an owning reference has many characteristics which make it
+more like a value: it is effectively part-way between a reference and a
+value. In particular, unlike other kinds of references, owning references
+are not polymorphic.</p>
 
 <p>A consequence of making <code>T~</code> a type is that it is
 possible to return owning references from functions, and to have
