@@ -276,8 +276,9 @@ destroying an object of some derived class, when using destructuring
 as per section 7.)</li>
 </ul>
 
-<p>In fact this paper will define a moveable value as a kind of reference
-&mdash; the implications of this are described in section 5. However the most
+<p>In fact this paper will define a moveable value as a kind of reference,
+so that <code>T~</code> is a reference type &mdash; the implications of this
+are described in section 5. However the most
 important properties of moveable values do not depend on this. Especially
 for function parameters, it is probably best to think of moveable values
 as a small modification of pass-by-value.</p>
@@ -285,18 +286,45 @@ as a small modification of pass-by-value.</p>
 
 <h3>3.1. Initialization of moveable values</h3>
 
-<p>Initialization of moveable values is almost identical to
-intialization of ordinary non-reference variables. For example:</p>
+<p>A moveable value of type <code>T~</code> can be initialized in one
+of three ways:</p>
 
-<pre><code>std::vector&lt;int&gt; v1{ 1, 3, 5 };
+<ol>
+<li>A moveable value can be initialized from a prvalue of type <code>T</code>.
+In this case, since a moveable value is formally a kind of reference,
+what happens is that the reference binds to the temporary object which
+is created by evaluating the prvalue expression.</li>
+<li>A moveable value can be initialized directly from an xvalue of type
+<code>T~</code>. This possibility will be covered in more detail in
+section 5: it implies a kind of <em>transfer of ownership</em> of the
+object referred to, and this forms the basis for how destructive move
+will work.</li>
+<li>Otherwise, the initialization of the moveable value involves calling
+a constructor or conversion operator to create a new object of type
+<code>T</code>. This object is then bound to the moveable value as
+in case 1. (Rarely, it is also possible to have a conversion operator
+which returns <code>T~</code>. In this case transfer of ownership takes
+place as in case 2.)</li>
+</ol>
+
+<p>These rules make the initialization of moveable values look very
+similar to the initialization of ordinary non-reference variables.
+So for example:</p>
+
+<pre><code>auto p1 = std::make_unique&lt;T&gt;(x, y);
+auto ~ p2 = std::make_unique&lt;T&gt;(x, y);
+
+std::vector&lt;int&gt; v1{ 1, 3, 5 };
 std::vector&lt;int&gt; ~ v2{ 1, 3, 5 };</code></pre>
 
-<p>The only observable difference here is that <code>v2</code> can be
-destructively moved from whereas <code>v1</code> cannot.</p>
+<p>The only observable differences here are that <code>p2</code>
+and <code>v2</code> can be destructively moved from,
+whereas <code>p1</code> and <code>v1</code> cannot.</p>
 
-<p>Suppose that a moveable value is initialized from an lvalue or rvalue
-reference. Then, just as if we were initializing a non-reference variable,
-this creates a new object by calling a constructor or conversion operator:</p>
+<p>Suppose that a moveable value is initialized from an lvalue, or from
+an expression of rvalue reference type. Then we are in case 3 above:
+just as if we were initializing a non-reference variable, this creates a
+new object by calling a constructor or conversion operator:</p>
 
 <pre><code>void f(std::vector&lt;int&gt; ~ v1);
 
@@ -323,9 +351,9 @@ void g()
 <code>std::move</code>. This is provided by the forwarding operator
 which will be described in section 4.</p>
 
-<p>It is <em>not</em> in general possible to initialize a moveable value
-<code>T~</code> with an expression of some type derived from <code>T</code>.
-That is,</p>
+<p>Another consequence of the above rules is that it is <em>not</em> in
+general possible to initialize a moveable value <code>T~</code> with an
+expression of some type derived from <code>T</code>. That is,</p>
 
 <pre><code>class T { ... };
 
@@ -339,11 +367,11 @@ void g()
 }
 </code></pre>
 
-<p>This would be valid if <code>T</code> has a C++11 move constructor.
-If <code>T</code> is not move-constructible, the author of
-<code>class U</code> can still arrange for <code>f(U{})</code> to be valid,
-but this would imply that the object of type <code>U</code> undergoes
-<em>destructuring</em> (see section 7).</p>
+<p>This would be valid if <code>T</code> has a copy constructor or
+C++11 move constructor. If <code>T</code> is not move-constructible,
+the author of <code>class U</code> can still arrange for <code>f(U{})</code>
+to be valid, but this would imply that the object of type <code>U</code>
+undergoes <em>destructuring</em> (see section 7).</p>
 
 
 <h3>3.2. Moveable values can be implemented either as values or
@@ -1812,9 +1840,10 @@ to write the relocating constructor differently.</p>
 
 <h3>7.6. Derived-to-base conversion of owning references</h3>
 
-<p>As mentioned in section 3.1, it is not generally possible to bind an
-owning reference to an object of some derived type. But this will be
-possible if the derived type is publicly destructurable:</p>
+<p>As mentioned in section 3.1, it is not possible to bind an
+owning reference directly to an object of some derived type. But it is
+possible to bind to a base class subobject if the derived type is
+publicly destructurable:</p>
 
 <pre><code>class T { ... };
 
@@ -1824,13 +1853,17 @@ void f(T ~ t);
 
 void g()
 {
-    f(U{});  // Valid only if the destructuring operation for U is public
+    f(U{});  // Valid if the destructuring operation for U is public
 }
 </code></pre>
 
 <p>If <code>U</code> has a public destructuring operation then this code
 is valid, and an implicit destructuring takes place when the function
-argument is evaluated.</p>
+argument is evaluated. Effectively this acts as an implicit conversion
+from <code>U~</code> to <code>T~</code>. (If <code>T</code> has a
+move constructor or copy constructor, then that would provide an alternative
+way to construct the function parameter above. However the derived-to-base
+conversion of owning references takes precedence.)</p>
 
 <p>Suppose that we change the example so that <code>T</code> is a base
 of <code>U</code> but not a direct base. Then additionally all intermediate
@@ -1843,7 +1876,7 @@ when the destructuring operation is accessible. Otherwise it would be
 too easy to accidentally destructure a class which performed important
 logic in its destructor.</p>
 
-<p>However, the class author can provide an explicit conversion
+<p>However, the class author can declare a public conversion operator
 if desired:</p>
 
 <pre><code>class U : public T
@@ -1854,12 +1887,12 @@ public:
 
 <p>This makes the derived-to-base conversion permitted even if the
 default destructuring operation would not be usable. And this
-explicit conversion will be used to perform the derived-to-base
-conversion whenever it is requested, even if the default destructuring
-operation would have been usable.</p>
+explicitly-declared conversion operator will be used to perform the
+derived-to-base conversion whenever it is requested, even if the default
+destructuring operation would have been usable.</p>
 
-<p>As in existing C++, lifetime-extension applies when an object is bound
-to a base class reference:</p>
+<p>As in existing C++, lifetime-extension applies when a temporary object
+initializes a base class reference:</p>
 
 <pre><code>T~ t = U{};</code></pre>
 
